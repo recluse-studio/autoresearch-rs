@@ -19,6 +19,9 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 .autoresearch-cache/
+support_docs/
+support_scripts/
 
-# Results file
-results.tsv
+# Root harness memory files
+/results.tsv
+/REFLECTION.json

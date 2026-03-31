@@ -1,10 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "autoresearch-rs"
+name = "autoresearch-apps"
 version = "0.1.0"
-description = "Autonomous markdown prose research loop"
+description = "Autonomous benchmarked web-app research loop"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "torch>=2.6.0",
-    "transformers>=4.49.0",
-]
+dependencies = []
+
+[project.scripts]
+autoresearch = "autoresearch_cli:main"
+
+[tool.setuptools]
+py-modules = ["autoresearch_cli", "prepare", "train"]
