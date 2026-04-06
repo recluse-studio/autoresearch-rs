@@ -24,4 +24,6 @@ support_scripts/
 
 # Root harness memory files
 /results.tsv
+/REFLECTION.md
 /REFLECTION.json
+/TODO.md

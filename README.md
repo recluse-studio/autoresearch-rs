@@ -17,7 +17,8 @@ You should not need to author a roadmap, task list, or benchmark file just to ge
 - `prepare.py` is the fixed harness and scorer plumbing
 - `train.py` is the loop runner
 - `results.tsv` is the persistent experiment log for fresh agent processes
-- `REFLECTION.json` stores the latest short failure reflection for the next iteration
+- `REFLECTION.md` stores the latest short failure reflection for the next iteration
+- `TODO.md` stores review debt that must be repaired before chasing novelty
 
 ## What changes
 
@@ -40,7 +41,7 @@ Starter setup for a new repo:
 1. Copy `prepare.py`, `program.md`, `train.py`, `autoresearch_cli.py`, `pyproject.toml`, and `uv.lock` into the target repo root.
 2. Copy the files from `place_these_in_root/` into the target repo root.
 3. Customize `ABOUT.md`, `BRAND.md`, and `FEATURES.md` so the loop has fast context for that app.
-4. Add root-level ignores for `results.tsv`, `REFLECTION.json`, and `.autoresearch-cache/` if your repo does not already ignore them.
+4. Add root-level ignores for `results.tsv`, `REFLECTION.md`, `TODO.md`, and `.autoresearch-cache/` if your repo does not already ignore them.
 
 Install the entrypoint from the repo root:
 
@@ -95,7 +96,8 @@ On each iteration, the loop:
 5. rescales the candidate with the same frozen benchmark
 6. keeps the patch only if `score_pct` improved
 7. appends a row to `results.tsv`
-8. updates `REFLECTION.json` with the latest short reflection after a discard or crash
+8. updates `REFLECTION.md` with the latest short reflection after a discard or crash
+9. updates `TODO.md` with review debt if a fast post-keep review finds that shipped work is incomplete, bluffing, or only labels without behavior
 
 Each iteration also prints:
 
@@ -123,7 +125,7 @@ If the evaluator cannot confidently resolve a repo snapshot, the harness falls b
   Optional diagnostics and scoring entrypoint. Useful for debugging the harness, but not required for normal use.
 
 - `place_these_in_root/`
-  Starter root files for a fresh target app repo: `ABOUT.md`, `BRAND.md`, `FEATURES.md`, `REFLECTION.json`, and `results.tsv`.
+  Starter root files for a fresh target app repo: `ABOUT.md`, `BRAND.md`, `FEATURES.md`, `REFLECTION.md`, `TODO.md`, and `results.tsv`.
 
 ## Notes
 
@@ -131,4 +133,4 @@ If the evaluator cannot confidently resolve a repo snapshot, the harness falls b
 - If you deliberately place a `benchmark.json` in the repo root, it acts as an advanced manual override. Normal usage does not require this.
 - `karpathy-files/` preserves upstream reference material.
 - Copilot quota or billing information is not exposed by the current CLI integration. The harness reports invocation count, duration, prompt bytes, and output bytes, and labels quota usage as unavailable.
-- The harness treats `results.tsv` and `REFLECTION.json` as root-level memory files in the target repo and expects them to stay untracked.
+- The harness treats `results.tsv`, `REFLECTION.md`, and `TODO.md` as root-level memory files in the target repo and expects them to stay untracked.

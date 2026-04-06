@@ -7,12 +7,17 @@ from unittest import mock
 import prepare
 from prepare import (
     Benchmark,
+    apply_conservative_discriminative_fallback,
     assemble_variables,
+    build_discriminative_retry_prompt,
+    build_json_repair_prompt,
     build_benchmark_synthesis_prompt,
     default_benchmark_payload,
     get_active_benchmark,
     is_protected_path,
     load_benchmark,
+    measurement_copies_task_baseline,
+    measurement_needs_discrimination,
     sanitize_synthesized_benchmark_payload,
     score_variables_python,
     validate_measurement,
@@ -78,22 +83,69 @@ MEASUREMENT = {
 }
 
 
+DIMENSION_BENCHMARK = {
+    "benchmark_id": "dim-001",
+    "app_name": "Dimension App",
+    "feature_name": "Dimension benchmark",
+    "app_summary": "Example benchmark for dimension scoring.",
+    "paths_of_interest": ["src/"],
+    "notes": ["Frozen inferred layer for the run."],
+    "build_commands": ["cargo test"],
+    "mandatory_criteria": [
+        {"id": "build-success", "description": "Build succeeds."},
+    ],
+    "dimensions": [
+        {
+            "id": "overall-clarity",
+            "description": "Overall clarity improves.",
+            "baseline_anchor": "Current baseline behavior.",
+            "w": 1.0,
+        }
+    ],
+    "taus": {"k": 0.28, "p": 1.1, "h": 0.4, "d": 1.2, "m": 1.35, "r": 0.5},
+    "persona_weights": [],
+    "tasks": [],
+}
+
+
+DIMENSION_MEASUREMENT_ZERO = {
+    "status": "resolved",
+    "g": 1,
+    "cosmic": {"entries": 0, "exits": 0, "reads": 0, "writes": 0},
+    "criteria": [
+        {"id": "build-success", "result": "pass", "reason": "Build passed."},
+    ],
+    "dimension_rows": [
+        {
+            "id": "overall-clarity",
+            "delta": 0.0,
+            "confidence": 0.7,
+            "observability": 0.7,
+            "reason": "No call made.",
+        }
+    ],
+}
+
+
 class PrepareTests(unittest.TestCase):
-    def test_default_benchmark_payload_prefers_task_scoring_shape(self) -> None:
+    def test_default_benchmark_payload_uses_static_twenty_dimension_shape(self) -> None:
         payload = default_benchmark_payload()
 
-        self.assertEqual(payload["dimensions"], [])
-        self.assertEqual(len(payload["persona_weights"]), 1)
-        self.assertEqual(len(payload["tasks"]), 1)
-        self.assertEqual(payload["tasks"][0]["persona_id"], payload["persona_weights"][0]["persona_id"])
+        self.assertEqual(len(payload["dimensions"]), 20)
+        self.assertEqual(payload["persona_weights"], [])
+        self.assertEqual(payload["tasks"], [])
+        self.assertEqual(payload["dimensions"][0]["id"], "core-task-effectiveness")
+        self.assertEqual(payload["dimensions"][-1]["id"], "holistic-improvement")
+        self.assertAlmostEqual(sum(row["w"] for row in payload["dimensions"]), 1.0)
 
-    def test_benchmark_prompt_requests_personas_and_tasks(self) -> None:
+    def test_benchmark_prompt_requests_fixed_twenty_dimension_scorecard(self) -> None:
         prompt = build_benchmark_synthesis_prompt()
 
-        self.assertIn("Prefer 1 to 3 personas and 2 to 6 tasks total.", prompt)
-        self.assertIn('"persona_weights"', prompt)
-        self.assertIn('"tasks"', prompt)
-        self.assertIn('"dimensions": []', prompt)
+        self.assertIn("Use all 20 fixed dimensions exactly as given.", prompt)
+        self.assertIn("holistic-improvement", prompt)
+        self.assertIn('"dimensions"', prompt)
+        self.assertIn('"persona_weights": []', prompt)
+        self.assertIn('"tasks": []', prompt)
 
     def test_load_benchmark_and_measurement_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -157,45 +209,38 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(measurement["feature_rows"][0]["task_id"], "create-brief")
         self.assertEqual(measurement["feature_rows"][1]["task_id"], "review-brief")
 
-    def test_sanitize_synthesized_benchmark_payload_normalizes_weights(self) -> None:
+    def test_sanitize_synthesized_benchmark_payload_merges_static_anchors(self) -> None:
         payload = sanitize_synthesized_benchmark_payload(
             {
                 "benchmark_id": " auto repo v1 ",
                 "app_name": " Auto Repo ",
                 "feature_name": " Core Flow ",
-                "persona_weights": [
-                    {"persona_id": "primary-user", "w": 1.0},
-                    {"persona_id": "secondary-user", "w": 0.6},
-                ],
-                "tasks": [
+                "dimensions": [
                     {
-                        "persona_id": "primary-user",
-                        "task_id": "complete-core-f low",
-                        "q": 0.75,
-                        "task_description": " Complete the main flow. ",
-                        "baseline": {"k": 10, "p": 5, "h": 1, "d": 0, "m": 2, "r": 1},
+                        "id": "core-task-effectiveness",
+                        "description": "ignored",
+                        "baseline_anchor": "Current repo baseline for the main job is already useful but still fairly manual.",
+                        "w": 0.99,
                     },
                     {
-                        "persona_id": "secondary-user",
-                        "task_id": "review-flow",
-                        "q": 0.25,
-                        "task_description": "Review the flow.",
-                        "baseline": {"k": 6, "p": 2, "h": 1, "d": 0, "m": 1, "r": 1},
+                        "id": "holistic-improvement",
+                        "description": "ignored",
+                        "baseline_anchor": "Baseline currently hangs together, but still feels more adjacent than unified.",
+                        "w": 0.01,
                     },
                 ],
             }
         )
-        persona_sum = sum(row["w"] for row in payload["persona_weights"])
-        primary_tasks = [row for row in payload["tasks"] if row["persona_id"] == "primary-user"]
-        secondary_tasks = [row for row in payload["tasks"] if row["persona_id"] == "secondary-user"]
 
-        self.assertAlmostEqual(persona_sum, 1.0)
         self.assertEqual(payload["benchmark_id"], "autorepov1")
-        self.assertEqual(primary_tasks[0]["task_id"], "complete-core-flow")
-        self.assertAlmostEqual(sum(row["q"] for row in primary_tasks), 1.0)
-        self.assertAlmostEqual(sum(row["q"] for row in secondary_tasks), 1.0)
+        self.assertEqual(len(payload["dimensions"]), 20)
+        self.assertAlmostEqual(sum(row["w"] for row in payload["dimensions"]), 1.0)
+        self.assertEqual(payload["dimensions"][0]["id"], "core-task-effectiveness")
+        self.assertIn("already useful but still fairly manual", payload["dimensions"][0]["baseline_anchor"])
+        self.assertEqual(payload["dimensions"][-1]["id"], "holistic-improvement")
+        self.assertIn("adjacent than unified", payload["dimensions"][-1]["baseline_anchor"])
 
-    def test_get_active_benchmark_resynthesizes_dimension_cache(self) -> None:
+    def test_get_active_benchmark_resynthesizes_nonstatic_cache(self) -> None:
         dimension_benchmark = {
             "benchmark_id": "dim-bench",
             "app_name": "Dimension App",
@@ -224,10 +269,9 @@ class PrepareTests(unittest.TestCase):
             tempdir_path = Path(tempdir)
             cache_path = tempdir_path / "frozen-benchmark.json"
             override_path = tempdir_path / "benchmark.json"
-            synthesized_path = tempdir_path / "synthesized.json"
-
             cache_path.write_text(json.dumps(dimension_benchmark), encoding="utf-8")
-            synthesized_path.write_text(json.dumps(EXAMPLE_BENCHMARK), encoding="utf-8")
+            synthesized_path = tempdir_path / "synthesized.json"
+            synthesized_path.write_text(json.dumps(default_benchmark_payload()), encoding="utf-8")
             synthesized_benchmark = load_benchmark(synthesized_path)
 
             with mock.patch.object(prepare, "CACHED_BENCHMARK_PATH", cache_path), mock.patch.object(
@@ -236,8 +280,85 @@ class PrepareTests(unittest.TestCase):
                 benchmark, source = get_active_benchmark(allow_synthesis=True)
 
         self.assertEqual(source, "synthesized")
-        self.assertEqual(len(benchmark.tasks), 2)
-        self.assertFalse(cache_path.exists())
+        self.assertEqual(len(benchmark.dimensions), 20)
+
+    def test_measurement_needs_discrimination_for_all_zero_dimension_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "benchmark.json"
+            path.write_text(json.dumps(DIMENSION_BENCHMARK), encoding="utf-8")
+            benchmark = load_benchmark(path)
+
+        measurement = validate_measurement(DIMENSION_MEASUREMENT_ZERO, benchmark)
+        self.assertTrue(
+            measurement_needs_discrimination(
+                benchmark,
+                measurement,
+                require_nonzero_delta=True,
+            )
+        )
+
+    def test_apply_conservative_discriminative_fallback_for_dimensions_produces_signed_score(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "benchmark.json"
+            path.write_text(json.dumps(DIMENSION_BENCHMARK), encoding="utf-8")
+            benchmark = load_benchmark(path)
+
+        measurement = validate_measurement(DIMENSION_MEASUREMENT_ZERO, benchmark)
+        fallback = apply_conservative_discriminative_fallback(
+            benchmark,
+            measurement,
+            reason="Evaluator would not discriminate.",
+        )
+        self.assertLess(fallback["dimension_rows"][0]["delta"], 0.0)
+        variables = assemble_variables(benchmark, fallback)
+        report = score_variables_python(variables)
+        self.assertLess(report["score"]["score_pct"], 0.0)
+
+    def test_measurement_copies_task_baseline_detects_baseline_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "benchmark.json"
+            path.write_text(json.dumps(EXAMPLE_BENCHMARK), encoding="utf-8")
+            benchmark = load_benchmark(path)
+
+        copied = {
+            "status": "resolved",
+            "g": 1,
+            "cosmic": {"entries": 0, "exits": 0, "reads": 0, "writes": 0},
+            "criteria": [],
+            "feature_rows": [
+                {
+                    "persona_id": task.persona_id,
+                    "task_id": task.task_id,
+                    "feature": task.baseline.to_dict(),
+                }
+                for task in benchmark.tasks
+            ],
+        }
+        measurement = validate_measurement(copied, benchmark)
+        self.assertTrue(measurement_copies_task_baseline(benchmark, measurement))
+
+    def test_build_discriminative_retry_prompt_for_dimensions_forbids_all_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "benchmark.json"
+            path.write_text(json.dumps(DIMENSION_BENCHMARK), encoding="utf-8")
+            benchmark = load_benchmark(path)
+        prompt = build_discriminative_retry_prompt(benchmark, [{"command": "cargo test", "ok": True}])
+        self.assertIn("all-zero dimension result is invalid", prompt)
+        self.assertIn("At least one dimension row must carry a non-zero signed delta", prompt)
+
+    def test_build_json_repair_prompt_demands_json_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "benchmark.json"
+            path.write_text(json.dumps(DIMENSION_BENCHMARK), encoding="utf-8")
+            benchmark = load_benchmark(path)
+        prompt = build_json_repair_prompt(
+            benchmark,
+            [{"command": "cargo test", "ok": True}],
+            prior_error="Failed to locate a JSON object in the evaluator output",
+            final_pass=True,
+        )
+        self.assertIn("Return exactly one JSON object and nothing else.", prompt)
+        self.assertIn("Failure reason: Failed to locate a JSON object in the evaluator output", prompt)
 
 
 if __name__ == "__main__":

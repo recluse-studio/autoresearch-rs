@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -36,14 +37,19 @@ from prepare import (
     restore_entries,
     run_agent_prompt,
     run_command,
+    extract_json_object,
 )
 
 
 RESULTS_PATH = ROOT / "results.tsv"
+RUNNER_CONFIG_PATH = ROOT / "autoresearch.config.json"
 LAST_AGENT_MESSAGE = CACHE_DIR / "last-agent-message.txt"
 LAST_BENCHMARK_HINT_PATH = CACHE_DIR / "last-benchmark-message.txt"
-REFLECTION_PATH = ROOT / "REFLECTION.json"
+REFLECTION_PATH = ROOT / "REFLECTION.md"
+TODO_PATH = ROOT / "TODO.md"
 LAST_REFLECTION_MESSAGE = CACHE_DIR / "last-reflection-message.txt"
+LAST_TODO_REVIEW_MESSAGE = CACHE_DIR / "last-todo-review-message.txt"
+STRATEGY_STATS_PATH = CACHE_DIR / "strategy-stats.json"
 APP_CONTEXT_DOCS = ("BRAND.md", "ABOUT.md", "FEATURES.md")
 DUMMY_COMMIT = "0000000"
 DEFAULT_ITERATIONS = 250
@@ -52,8 +58,49 @@ ITERATION_HARD_TIMEOUT_SECONDS = 900
 ITERATION_EVALUATION_RESERVE_SECONDS = 240
 HEARTBEAT_SECONDS = 90
 REFLECTION_TIMEOUT_SECONDS = 60
+TODO_REVIEW_TIMEOUT_SECONDS = 75
+MAX_AGENT_PASSES_PER_ITERATION = 3
+MIN_RETRY_WINDOW_SECONDS = 150
 PRINT_LOCK = threading.Lock()
-DEFAULT_PROGRAM_TEXT = """# autoresearch apps\n\nHigher is better. Your job is to improve the app by increasing the frozen benchmark score.\nThe goal is simple: get the highest score possible or at the very least, beat the previous score.\n\nRules:\n- Start by reading `BRAND.md`, `ABOUT.md`, and `FEATURES.md` if they exist. Use them as quick context.\n- Use those docs plus `results.tsv` for fast orientation. Do not waste the iteration rediscovering the whole repo unless those files are missing.\n- Existing AI or model capabilities already present in the app are fair game if using them can improve the score. Treat any such hooks as a gateway into AI-native or agentic product ideas when those ideas can beat the score.\n- If `REFLECTION.json` exists, treat the latest reflection as short human-readable memory about why recent failures failed and what directions might work better next.\n- Only the latest reflection matters. Use it as a quick correction, not as a long history lesson.\n- Treat `results.tsv` as read-only harness memory. Read it, but do not edit it.\n- You are a completely autonomous software developer and researcher, trying things out. If they work, keep. If they don't, discard.\n- Read the brief, read the last few results, pick a direction fast, and beat the score.\n- Each iteration has a 15-minute total budget, including reading, reasoning, making the patch, and leaving time for assessment.\n- Use that budget however you judge best.\n- The scorer uses a hidden frozen benchmark for the run. Do not try to redefine the benchmark while working.\n- Do not edit `program.md`, `prepare.py`, `train.py`, `results.tsv`, `REFLECTION.json`, anything under `support_docs/`, anything under `support_scripts/`, anything under `.autoresearch-cache/`, or anything under `karpathy-files/`.\n- Beat the score. Bold relevant changes are welcome.\n- Performance, UI/UX clarity, workflow quality, brand/about evolution, model-powered workflows, and new features are equally valid ways to improve the score. Do not over-index on incremental feature additions.\n- You may modify application code, tests, templates, styles, build files, `BRAND.md`, `ABOUT.md`, and `FEATURES.md` if doing so helps the score.\n- Do not add dependencies unless they are clearly necessary.\n- If the repo contains `results.tsv`, treat it as the canonical experiment log across iterations. Read it before choosing a new idea and avoid repeating discarded or crashed experiments unless you are deliberately fixing the failure mode or trying a materially different variant.\n- If the repo contains `progress.txt`, treat it as shipped-work history and avoid duplicating what is already there.\n- The evaluator will recompute only measured candidate-side values. Frozen benchmark weights and anchors are not part of the search space.\n- Each iteration is a fresh agent process. Make one attempt and exit.\n- NEVER STOP IMPROVING. AIM FOR GREATNESS. AIM FOR EXTRAORDINARY.\n\nWhen you finish, reply with one tab-separated line:\n\n`<path-or-scope>\t<short description>`\n"""
+DEFAULT_DIRTY_TREE_POLICY = "auto_stash"
+DEFAULT_BASELINE_FAILURE_ABORT_THRESHOLD = 3
+DEFAULT_BANDIT_EXPLORATION = 0.85
+DEFAULT_REVIEW_ENABLED = True
+DEFAULT_REVIEW_REASONING_EFFORT = "medium"
+TODO_ITEM_PATTERN = re.compile(r"^- \[(?P<done>[ xX])\] (?P<text>.+?)(?: \(files: (?P<files>.+?)\))?$")
+DEFAULT_STRATEGY_ARMS = [
+    {
+        "id": "workflow",
+        "label": "Workflow",
+        "instruction": "Favor a stronger workflow change, simplification, or restructuring that could make the app materially easier or faster to use.",
+    },
+    {
+        "id": "ui",
+        "label": "UI/UX",
+        "instruction": "Favor a clearer, bolder UI or information architecture move that could materially improve readability, focus, or decision-making.",
+    },
+    {
+        "id": "performance",
+        "label": "Performance",
+        "instruction": "Favor a responsiveness, efficiency, or friction-reduction move that could materially improve how fast or smooth the app feels.",
+    },
+    {
+        "id": "brand",
+        "label": "Brand/About",
+        "instruction": "Favor a meaningful evolution of the app's brand, aboutness, or product framing when that could unlock a stronger overall product direction.",
+    },
+    {
+        "id": "feature",
+        "label": "Feature",
+        "instruction": "Favor a larger, more useful feature or capability move when it could create a real step-change in value.",
+    },
+    {
+        "id": "ai",
+        "label": "AI-Native",
+        "instruction": "Favor an AI-native or agentic move that uses existing model hooks or related surfaces to create a materially stronger product direction.",
+    },
+]
+DEFAULT_PROGRAM_TEXT = """# autoresearch apps\n\nHigher is better. Your job is to improve the app by increasing the frozen benchmark score.\nThe goal is simple: get the highest score possible or at the very least, beat the previous score.\n\nRules:\n- Start by reading `BRAND.md`, `ABOUT.md`, and `FEATURES.md` if they exist. Use them as quick context.\n- Use those docs plus `results.tsv` for fast orientation. Do not waste the iteration rediscovering the whole repo unless those files are missing.\n- Existing capabilities such as optional Azure OpenAI integration are fair game if using them can improve the score. Treat the current Azure OpenAI hook as a gateway into AI-native or agentic product ideas when those ideas can beat the score.\n- If `REFLECTION.md` exists, treat the latest reflection as short human-readable memory about why recent failures failed and what directions might work better next.\n- Only the latest reflection matters. Use it as a quick correction, not as a long history lesson.\n- If `TODO.md` exists, treat unchecked items as review debt from previously kept work. Fix that debt before chasing novelty, or fold the repair into one stronger move.\n- You may update `TODO.md` only to mark an existing debt item done when the code truly fixes it. A fast review pass will verify this and reopen anything that is bluffing, incomplete, or just labels without behavior.\n- Treat `results.tsv` as read-only harness memory. Read it, but do not edit it.\n- You are a completely autonomous software developer and researcher, trying things out. If they work, keep. If they don't, discard.\n- Read the brief, read the last few results, pick a direction fast, and beat the score.\n- Each iteration has a 15-minute total budget, including reading, reasoning, making the patch, and leaving time for assessment.\n- Use that budget however you judge best.\n- The scorer uses a fixed 20-parameter application scorecard for the run. Any one dimension can move the needle if you improve it strongly enough, and coherent multi-area moves can also win through holistic improvement.\n- Do not spray lots of tiny tweaks across the app hoping to collect small points. One strong focused win or one coherent whole-app improvement is better.\n- Do not edit `program.md`, `prepare.py`, `train.py`, `results.tsv`, `REFLECTION.md`, anything under `support_docs/`, anything under `support_scripts/`, anything under `.autoresearch-cache/`, or anything under `karpathy-files/`. `TODO.md` is the one exception and only for honestly checking off repaired debt.\n- Beat the score. Bold relevant changes are welcome.\n- Workflow, UI, interaction clarity, reliability, state continuity, data quality, performance, feature value, brand/about evolution, AI usefulness, and holistic product improvements are all valid ways to improve the score.\n- You may modify application code, tests, templates, styles, build files, `BRAND.md`, `ABOUT.md`, and `FEATURES.md` if doing so helps the score.\n- Do not add dependencies unless they are clearly necessary.\n- If the repo contains `results.tsv`, treat it as the canonical experiment log across iterations. Read it before choosing a new idea and avoid repeating discarded or crashed experiments unless you are deliberately fixing the failure mode or trying a materially different variant.\n- If the repo contains `progress.txt`, treat it as shipped-work history and avoid duplicating what is already there.\n- The evaluator will recompute only measured candidate-side values. Frozen benchmark anchors are not part of the search space.\n- Each iteration is a fresh agent process. Make one attempt and exit.\n- NEVER STOP IMPROVING. AIM FOR GREATNESS. AIM FOR EXTRAORDINARY.\n\nWhen you finish, reply with one tab-separated line:\n\n`<path-or-scope>\t<short description>`\n"""
 RETRO_PULP_QUOTES = [
     "The star-map trembles when the future changes its mind.",
     "No radar sees the courage that carries a small ship through a black sun.",
@@ -147,6 +194,192 @@ def read_program() -> str:
 def clean_history_text(value: str, *, fallback: str = "") -> str:
     collapsed = " ".join(str(value or "").replace("\t", " ").split())
     return collapsed or fallback
+
+
+def load_runner_config() -> Dict[str, Any]:
+    config: Dict[str, Any] = {
+        "dirty_tree_policy": DEFAULT_DIRTY_TREE_POLICY,
+        "baseline_failure_abort_threshold": DEFAULT_BASELINE_FAILURE_ABORT_THRESHOLD,
+        "competition_enabled": True,
+        "bandit_exploration": DEFAULT_BANDIT_EXPLORATION,
+        "review_enabled": DEFAULT_REVIEW_ENABLED,
+        "review_reasoning_effort": DEFAULT_REVIEW_REASONING_EFFORT,
+        "review_model": "",
+        "review_timeout_seconds": TODO_REVIEW_TIMEOUT_SECONDS,
+        "strategy_arms": DEFAULT_STRATEGY_ARMS,
+    }
+    if not RUNNER_CONFIG_PATH.exists():
+        return config
+    try:
+        payload = json.loads(RUNNER_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return config
+    if not isinstance(payload, dict):
+        return config
+    dirty_tree_policy = clean_history_text(payload.get("dirty_tree_policy", ""), fallback=config["dirty_tree_policy"]).lower()
+    if dirty_tree_policy in {"abort", "auto_stash", "auto_restore"}:
+        config["dirty_tree_policy"] = dirty_tree_policy
+    try:
+        threshold = int(payload.get("baseline_failure_abort_threshold", config["baseline_failure_abort_threshold"]))
+        config["baseline_failure_abort_threshold"] = max(1, threshold)
+    except Exception:
+        pass
+    config["competition_enabled"] = bool(payload.get("competition_enabled", config["competition_enabled"]))
+    try:
+        exploration = float(payload.get("bandit_exploration", config["bandit_exploration"]))
+        config["bandit_exploration"] = max(0.0, exploration)
+    except Exception:
+        pass
+    config["review_enabled"] = bool(payload.get("review_enabled", config["review_enabled"]))
+    review_effort = clean_history_text(
+        payload.get("review_reasoning_effort", ""),
+        fallback=config["review_reasoning_effort"],
+    ).lower()
+    if review_effort in {"low", "medium", "high", "xhigh"}:
+        config["review_reasoning_effort"] = review_effort
+    config["review_model"] = clean_history_text(
+        payload.get("review_model", ""),
+        fallback=config["review_model"],
+    )
+    try:
+        review_timeout = int(payload.get("review_timeout_seconds", config["review_timeout_seconds"]))
+        config["review_timeout_seconds"] = max(15, review_timeout)
+    except Exception:
+        pass
+    arms_payload = payload.get("strategy_arms")
+    if isinstance(arms_payload, list):
+        parsed_arms: List[Dict[str, str]] = []
+        for item in arms_payload:
+            if not isinstance(item, dict):
+                continue
+            arm_id = clean_history_text(item.get("id", ""), fallback="").lower()
+            instruction = clean_history_text(item.get("instruction", ""), fallback="")
+            label = clean_history_text(item.get("label", ""), fallback=arm_id)
+            if not arm_id or not instruction:
+                continue
+            parsed_arms.append({"id": arm_id, "label": label or arm_id, "instruction": instruction})
+        if parsed_arms:
+            config["strategy_arms"] = parsed_arms
+    return config
+
+
+def default_strategy_stats(config: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    return {
+        str(arm["id"]): {
+            "pulls": 0.0,
+            "wins": 0.0,
+            "losses": 0.0,
+            "crashes": 0.0,
+            "total_reward": 0.0,
+        }
+        for arm in config["strategy_arms"]
+    }
+
+
+def load_strategy_stats(config: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+    stats = default_strategy_stats(config)
+    if not STRATEGY_STATS_PATH.exists():
+        return stats
+    try:
+        payload = json.loads(STRATEGY_STATS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return stats
+    if not isinstance(payload, dict):
+        return stats
+    for arm_id, values in stats.items():
+        source = payload.get(arm_id)
+        if not isinstance(source, dict):
+            continue
+        for key in ("pulls", "wins", "losses", "crashes", "total_reward"):
+            try:
+                values[key] = float(source.get(key, values[key]))
+            except Exception:
+                continue
+    return stats
+
+
+def save_strategy_stats(stats: Dict[str, Dict[str, float]]) -> None:
+    STRATEGY_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STRATEGY_STATS_PATH.write_text(json.dumps(stats, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def choose_strategy_arm(
+    config: Dict[str, Any],
+    stats: Dict[str, Dict[str, float]],
+    *,
+    tried_ids: Sequence[str],
+) -> Dict[str, str]:
+    arms = list(config["strategy_arms"])
+    remaining = [arm for arm in arms if arm["id"] not in tried_ids]
+    candidate_arms = remaining or arms
+    for arm in candidate_arms:
+        if stats.get(arm["id"], {}).get("pulls", 0.0) <= 0.0:
+            return arm
+    total_pulls = sum(max(1.0, stats[arm["id"]]["pulls"]) for arm in arms)
+    exploration = float(config["bandit_exploration"])
+
+    def arm_score(arm: Dict[str, str]) -> float:
+        arm_stats = stats[arm["id"]]
+        pulls = max(1.0, arm_stats["pulls"])
+        mean_reward = arm_stats["total_reward"] / pulls
+        bonus = exploration * math.sqrt(math.log(max(2.0, total_pulls)) / pulls)
+        return mean_reward + bonus
+
+    return max(candidate_arms, key=arm_score)
+
+
+def update_strategy_stats(
+    stats: Dict[str, Dict[str, float]],
+    *,
+    arm_id: str,
+    baseline_score: float,
+    status: str,
+    score_delta: Optional[float] = None,
+) -> None:
+    arm_stats = stats.setdefault(
+        arm_id,
+        {"pulls": 0.0, "wins": 0.0, "losses": 0.0, "crashes": 0.0, "total_reward": 0.0},
+    )
+    arm_stats["pulls"] += 1.0
+    reward = -1.0
+    if status == "keep" and score_delta is not None:
+        arm_stats["wins"] += 1.0
+        reward = min(1.0, max(0.1, score_delta / max(abs(baseline_score), 1.0)))
+    elif status == "discard" and score_delta is not None:
+        arm_stats["losses"] += 1.0
+        reward = max(-1.0, min(0.0, score_delta / max(abs(baseline_score), 1.0)))
+    else:
+        arm_stats["crashes"] += 1.0
+        reward = -1.0
+    arm_stats["total_reward"] += reward
+
+
+def build_strategy_block(arm: Optional[Dict[str, str]], *, attempt_number: int, config: Dict[str, Any]) -> str:
+    if not config.get("competition_enabled") or not arm:
+        return ""
+    label = clean_history_text(arm.get("label", ""), fallback=arm.get("id", "strategy"))
+    instruction = clean_history_text(arm.get("instruction", ""), fallback="")
+    if not instruction:
+        return ""
+    return (
+        f"Strategy arm for attempt {attempt_number}: {label}\n"
+        f"Use this as a competitive emphasis, not as a restriction: {instruction}\n"
+    )
+
+
+def auto_handle_dirty_tree(config: Dict[str, Any]) -> Optional[str]:
+    entries = parse_status_entries(cwd=ROOT)
+    if not entries:
+        return None
+    policy = str(config.get("dirty_tree_policy", DEFAULT_DIRTY_TREE_POLICY))
+    if policy == "abort":
+        raise RuntimeError("Working tree must be clean before running an experiment.")
+    if policy == "auto_restore":
+        restore_entries(run_command(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT).stdout.strip(), entries, cwd=ROOT)
+        return "auto-restored dirty tracked changes before run start"
+    stash_message = f"autoresearch-autostash-{time.strftime('%Y%m%d-%H%M%S')}"
+    run_command(["git", "stash", "push", "-u", "-m", stash_message], cwd=ROOT)
+    return f"auto-stashed dirty tree before run start as {stash_message}"
 
 
 def load_experiment_history(limit: int = RESULT_HISTORY_LIMIT) -> List[Dict[str, str]]:
@@ -265,24 +498,118 @@ def load_latest_reflection_note(max_chars: int = 1200) -> str:
     if not REFLECTION_PATH.exists():
         return ""
     try:
-        payload = json.loads(REFLECTION_PATH.read_text(encoding="utf-8", errors="replace"))
+        raw = REFLECTION_PATH.read_text(encoding="utf-8", errors="replace").strip()
     except Exception:
         return ""
-    if not isinstance(payload, dict):
+    if not raw:
         return ""
-    latest = payload.get("latest")
-    if not isinstance(latest, dict):
-        return ""
-    attempt = clean_history_text(latest.get("attempt", ""), fallback="")
-    reflection = clean_history_text(latest.get("reflection", ""), fallback="")
-    if not attempt and not reflection:
+    blocks = [block.strip() for block in raw.split("\n## ") if block.strip()]
+    if not blocks:
         return ""
     parts: List[str] = []
-    if attempt:
-        parts.append(f"Attempt: {attempt}")
-    if reflection:
-        parts.append(f"Reflection: {reflection}")
+    latest = blocks[-1]
+    for line in latest.splitlines():
+        stripped = clean_history_text(line, fallback="")
+        if stripped.startswith("Attempt:"):
+            parts.append(stripped)
+        elif stripped.startswith("Reflection:"):
+            parts.append(stripped)
+    if not parts:
+        return ""
     snippet = "\n".join(parts)
+    return snippet if len(snippet) <= max_chars else f"{snippet[:max_chars].rstrip()}..."
+
+
+def sanitize_todo_text(value: str) -> str:
+    cleaned = clean_history_text(value, fallback="")
+    cleaned = cleaned.lstrip("-* ")
+    cleaned = cleaned.replace("[ ]", "").replace("[x]", "").replace("[X]", "").strip()
+    if len(cleaned) > 220:
+        cleaned = f"{cleaned[:220].rstrip()}..."
+    return cleaned
+
+
+def ensure_todo_md() -> None:
+    TODO_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if TODO_PATH.exists():
+        return
+    TODO_PATH.write_text(
+        "# TODO\n\n"
+        "Fast review debt carried between iterations.\n\n"
+        "- [x] No open review debt right now.\n",
+        encoding="utf-8",
+    )
+
+
+def parse_todo_items(raw_text: str) -> List[Dict[str, object]]:
+    items: List[Dict[str, object]] = []
+    for raw_line in raw_text.splitlines():
+        match = TODO_ITEM_PATTERN.match(raw_line.strip())
+        if not match:
+            continue
+        text = sanitize_todo_text(match.group("text"))
+        if not text or text.lower() == "no open review debt right now.":
+            continue
+        files_raw = clean_history_text(match.group("files") or "", fallback="")
+        files = [part.strip() for part in files_raw.split(",") if part.strip()]
+        items.append(
+            {
+                "done": match.group("done").lower() == "x",
+                "text": text,
+                "files": files,
+            }
+        )
+    return items
+
+
+def load_todo_items() -> List[Dict[str, object]]:
+    ensure_todo_md()
+    try:
+        raw = TODO_PATH.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    return parse_todo_items(raw)
+
+
+def format_todo_item(item: Dict[str, object]) -> str:
+    mark = "x" if bool(item.get("done")) else " "
+    text = sanitize_todo_text(str(item.get("text", "")))
+    files = [
+        clean_history_text(str(value), fallback="")
+        for value in item.get("files", [])
+        if clean_history_text(str(value), fallback="")
+    ]
+    files_suffix = f" (files: {', '.join(files[:4])})" if files else ""
+    return f"- [{mark}] {text}{files_suffix}".rstrip()
+
+
+def write_todo_items(items: Sequence[Dict[str, object]], summary: str = "") -> None:
+    ensure_todo_md()
+    unresolved = [dict(item) for item in items if not bool(item.get("done")) and sanitize_todo_text(str(item.get("text", "")))]
+    resolved = [dict(item) for item in items if bool(item.get("done")) and sanitize_todo_text(str(item.get("text", "")))]
+    lines = [
+        "# TODO",
+        "",
+        "Fast review debt carried between iterations.",
+    ]
+    summary = clean_history_text(summary, fallback="")
+    if summary:
+        lines.extend(["", f"Summary: {summary}"])
+    lines.append("")
+    if unresolved or resolved:
+        for item in unresolved + resolved[:4]:
+            lines.append(format_todo_item(item))
+    else:
+        lines.append("- [x] No open review debt right now.")
+    lines.append("")
+    TODO_PATH.write_text("\n".join(lines), encoding="utf-8")
+
+
+def load_open_todo_notes(max_chars: int = 1200) -> str:
+    items = [item for item in load_todo_items() if not bool(item.get("done"))]
+    if not items:
+        return ""
+    snippet = "\n".join(format_todo_item(item) for item in items[:8])
     return snippet if len(snippet) <= max_chars else f"{snippet[:max_chars].rstrip()}..."
 
 
@@ -327,7 +654,7 @@ def load_app_context_docs(max_chars: int = 10_000) -> str:
             continue
         if not text:
             continue
-        blocks.append(f"Authoritative product context from {filename}:\n{text}")
+        blocks.append(f"Product context from {filename}:\n{text}")
     if not blocks:
         return ""
     joined = "\n\n".join(blocks)
@@ -411,7 +738,7 @@ def build_reflection_prompt(
     dimension_notes = "\n".join(f"- {item}" for item in reflection_dimension_lines(candidate_report, limit=4)) or "- none"
     return (
         "You are writing a short human-readable reflection for an autonomous app-improvement loop.\n"
-        "The harness will store your note as the latest record in REFLECTION.json.\n"
+        "The harness will store your note in REFLECTION.md.\n"
         "Write one sentence, or at most two very short sentences, with no bullets and no markdown fences.\n"
         "Keep the full note under 45 words.\n"
         "Write for a tired human reader skimming a run log, not for an engineer reading a postmortem.\n"
@@ -436,16 +763,14 @@ def build_reflection_prompt(
 
 def append_reflection(iteration: int, status: str, scope: str, description: str, reflection_text: str) -> None:
     REFLECTION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "latest": {
-            "iteration": iteration,
-            "status": status.lower(),
-            "scope": clean_history_text(scope, fallback="candidate"),
-            "attempt": clean_history_text(description, fallback="candidate edit"),
-            "reflection": sanitize_reflection_text(reflection_text),
-        }
-    }
-    REFLECTION_PATH.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    if not REFLECTION_PATH.exists():
+        REFLECTION_PATH.write_text("# Reflection\n\nShort notes from the latest failed attempts.\n", encoding="utf-8")
+    with REFLECTION_PATH.open("a", encoding="utf-8", newline="") as handle:
+        handle.write(
+            f"\n\n## Iteration {iteration} - {status.upper()}\n"
+            f"Attempt: {clean_history_text(description, fallback='candidate edit')}\n"
+            f"Reflection: {sanitize_reflection_text(reflection_text)}\n"
+        )
 
 
 def write_failure_reflection(
@@ -505,7 +830,14 @@ def write_failure_reflection(
     return reflection_text
 
 
-def build_prompt(baseline_report: dict) -> str:
+def build_prompt(
+    baseline_report: dict,
+    retry_feedback: str = "",
+    *,
+    attempt_number: int = 1,
+    strategy_arm: Optional[Dict[str, str]] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> str:
     score = baseline_report["assessment"]["score"]
     build_commands = [item["command"] for item in baseline_report["build_results"]]
     corrective_message = latest_corrective_message()
@@ -513,6 +845,13 @@ def build_prompt(baseline_report: dict) -> str:
     app_context_block = load_app_context_docs()
     benchmark_hint = load_benchmark_hint()
     reflection_notes = load_latest_reflection_note()
+    todo_notes = load_open_todo_notes()
+    retry_feedback = clean_history_text(retry_feedback, fallback="")
+    strategy_block = build_strategy_block(
+        strategy_arm,
+        attempt_number=attempt_number,
+        config=config or load_runner_config(),
+    )
     benchmark_hint_block = (
         "\nRecent benchmark hint excerpt from .autoresearch-cache/last-benchmark-message.txt:\n"
         f"{benchmark_hint}\n"
@@ -520,9 +859,21 @@ def build_prompt(baseline_report: dict) -> str:
         else ""
     )
     reflection_block = (
-        "\nLatest reflection memory from REFLECTION.json:\n"
+        "\nLatest reflection memory from REFLECTION.md:\n"
         f"{reflection_notes}\n"
         if reflection_notes
+        else ""
+    )
+    todo_block = (
+        "\nOpen review debt from TODO.md:\n"
+        f"{todo_notes}\n"
+        if todo_notes
+        else ""
+    )
+    retry_block = (
+        "\nSame-iteration retry feedback:\n"
+        f"{retry_feedback}\n"
+        if retry_feedback
         else ""
     )
     benchmark_payload = baseline_report.get("benchmark_payload", {}) or {}
@@ -565,14 +916,19 @@ def build_prompt(baseline_report: dict) -> str:
         "1. Read BRAND.md, ABOUT.md, and FEATURES.md first if they exist for quick context.\n"
         "2. Read the last few lines of results.tsv so you do not repeat a failed idea.\n"
         "3. Read the latest reflection memory if it exists.\n"
-        "4. Pick a direction fast and beat the score.\n"
-        "5. Treat results.tsv as read-only harness memory. Do not edit it.\n"
-        "6. If .autoresearch-cache/last-benchmark-message.txt exists, use it as the next clue for where to act.\n"
-        "7. Start with the app files most implicated by the brief, recent results, latest reflection, or the benchmark hint.\n"
-        "8. Do not run shell commands or tests yourself; the harness does verification after your patch.\n\n"
+        "4. Read TODO.md if it has open review debt, and fix that debt before chasing novelty unless one stronger move can honestly do both.\n"
+        "5. Pick a direction fast and beat the score.\n"
+        "5a. If a strategy arm is present, use it as the main attack angle for this attempt.\n"
+        "6. Treat results.tsv as read-only harness memory. Do not edit it.\n"
+        "7. If .autoresearch-cache/last-benchmark-message.txt exists, use it as the next clue for where to act.\n"
+        "8. Start with the app files most implicated by the brief, recent results, latest reflection, open TODO debt, or the benchmark hint.\n"
+        "9. Do not run shell commands or tests yourself; the harness does verification after your patch.\n\n"
         f"{app_context_block}\n\n"
         f"{benchmark_hint_block}"
         f"{reflection_block}"
+        f"{todo_block}"
+        f"{strategy_block}"
+        f"{retry_block}"
         f"{format_experiment_memory()}\n\n"
         f"{score_block}\n"
         f"Current gate g: {baseline_report['measurement']['g']}\n"
@@ -584,12 +940,17 @@ def build_prompt(baseline_report: dict) -> str:
         "Work inside this repository. A hidden frozen benchmark will be re-evaluated after your patch. "
         "Use BRAND.md, ABOUT.md, and FEATURES.md for quick context. "
         "Read results.tsv if it exists and use it as persistent experiment memory across fresh agent processes. Do not edit it. "
-        "Read REFLECTION.json if it exists and use only the latest reflection as quick memory about why the last failure failed. "
+        "Read REFLECTION.md if it exists and use only the latest reflection as quick memory about why the last failure failed. "
+        "Read TODO.md if it exists and treat unchecked items as real review debt from earlier kept work. Fix that debt before novelty, or fold the repair into one stronger move. "
+        "You may mark an existing TODO.md item done only when the code truly fixes it; a fast review pass will reopen anything that is bluffing, incomplete, or only cosmetic. "
+        "If same-iteration retry feedback is present, use it and take a materially stronger second swing instead of repeating the same move. "
         "If .autoresearch-cache/last-benchmark-message.txt exists, treat it as the highest-signal benchmark hint and use it early instead of rediscovering the whole repo. "
         "Do not repeat discarded or crashed experiments unless you are clearly addressing why they failed. "
         "The goal is simple: get the highest score possible or at the very least beat the previous score. "
-        "Performance, UI/UX clarity, workflow quality, brand/about evolution, model-powered workflows, and new features are equally valid ways to improve the score. "
-        "If the app already has AI or model runtime hooks, using them is allowed. Treat those hooks as a gateway into AI-native or agentic product ideas when they can improve the score. "
+        "The score now comes from a fixed 20-parameter application scorecard, so strong focused wins are valid and coherent multi-area wins can also score through holistic improvement. "
+        "Do not spray lots of tiny unrelated tweaks across the app hoping to collect points. "
+        "Workflow, UI, interaction clarity, reliability, state continuity, data quality, performance, feature value, brand/about evolution, and AI usefulness are all valid ways to improve the score. "
+        "If the app already has optional AI or model runtime hooks, using them is allowed. Treat those hooks as a gateway into AI-native or agentic product ideas when they can improve the score. "
         f"The entire iteration is capped at {ITERATION_HARD_TIMEOUT_SECONDS} seconds, including scoring. "
         f"The harness will leave about {ITERATION_EVALUATION_RESERVE_SECONDS} seconds at the end for candidate evaluation, and the rest of the remaining iteration budget is yours to allocate. "
         "You decide how long to reason, how long to explore, and how long to edit. "
@@ -597,12 +958,13 @@ def build_prompt(baseline_report: dict) -> str:
         "Do not use shell commands or try to run tests yourself; the harness reruns verification after your patch. "
         "Use repository reads/searches plus apply_patch. Aim for depth and leverage, not just quick visible motion. "
         "You may change BRAND.md, ABOUT.md, and FEATURES.md if doing so helps the score. "
+        "You may update TODO.md only to check off debt you actually repaired. Do not invent new checklist items there. "
         "Do not create planning files outside the repo. "
         "If the repo is ambiguous, pick a move fast and swing. "
         "Exit once your attempt is done."
         f"{corrective_block} "
         "Do not edit support_docs/, support_scripts/, karpathy-files/, benchmark.json if present, "
-        "program.md, prepare.py, train.py, results.tsv, REFLECTION.json, or anything under .autoresearch-cache/. "
+        "program.md, prepare.py, train.py, results.tsv, REFLECTION.md, or anything under .autoresearch-cache/. TODO.md is the one exception and only for honestly checking off repaired debt. "
         "NEVER STOP IMPROVING. AIM FOR GREATNESS. AIM FOR EXTRAORDINARY. "
         "One fresh agent process is created per iteration, so finish the patch and exit cleanly. "
         "When you finish, reply with one tab-separated line: <path-or-scope>\\t<short description>."
@@ -629,6 +991,72 @@ def compute_agent_timeout(*, deadline_monotonic: float) -> int:
     return max(1, int(math.floor(remaining - ITERATION_EVALUATION_RESERVE_SECONDS)))
 
 
+def can_retry_within_iteration(*, attempt_number: int, deadline_monotonic: float) -> bool:
+    if attempt_number >= MAX_AGENT_PASSES_PER_ITERATION:
+        return False
+    remaining = deadline_monotonic - time.monotonic()
+    return remaining > (ITERATION_EVALUATION_RESERVE_SECONDS + MIN_RETRY_WINDOW_SECONDS)
+
+
+def build_same_iteration_retry_feedback(
+    *,
+    status: str,
+    baseline_score: float,
+    description: str,
+    scope: str,
+    changed_files: Sequence[str],
+    error: str = "",
+    candidate_score: Optional[float] = None,
+    candidate_report: Optional[Dict[str, Any]] = None,
+) -> str:
+    changed_summary = ", ".join(changed_files[:4]) if changed_files else "none"
+    if status == "crash":
+        detail = clean_history_text(error, fallback="verification failed")
+        return (
+            f"Last attempt in this same iteration crashed. Scope: {clean_history_text(scope, fallback='candidate')}. "
+            f"Description: {clean_history_text(description, fallback='candidate edit')}. "
+            f"Files: {changed_summary}. Failure: {detail[:220]}. "
+            "Do not repeat that failure mode. Take a different or cleaner swing."
+        )
+    if status == "discard" and candidate_score is not None:
+        dimension_notes = " | ".join(reflection_dimension_lines(candidate_report, limit=2))
+        feedback = (
+            f"Last attempt in this same iteration lost. Scope: {clean_history_text(scope, fallback='candidate')}. "
+            f"Description: {clean_history_text(description, fallback='candidate edit')}. "
+            f"It scored {candidate_score:.6f} against baseline {baseline_score:.6f}. "
+            f"Files: {changed_summary}. "
+        )
+        if dimension_notes:
+            feedback += f"Likely why: {dimension_notes}. "
+        feedback += "Do not repeat that move. Pick a materially stronger direction."
+        return feedback
+    return (
+        f"Last attempt in this same iteration produced no useful candidate. Scope: {clean_history_text(scope, fallback='candidate')}. "
+        f"Description: {clean_history_text(description, fallback='candidate edit')}. Files: {changed_summary}. "
+        "Do not repeat that path. Pick a more decisive move."
+    )
+
+
+def summarize_same_iteration_retry(
+    *,
+    attempt_number: int,
+    status: str,
+    description: str,
+    baseline_score: float,
+    candidate_score: Optional[float] = None,
+    error: str = "",
+) -> str:
+    if status == "crash":
+        detail = clean_history_text(error, fallback="verification failed")
+        return f"attempt {attempt_number}: crash | {clean_history_text(description, fallback='candidate edit')} | {detail[:140]}"
+    if candidate_score is None:
+        return f"attempt {attempt_number}: discard | {clean_history_text(description, fallback='candidate edit')} | no valid candidate"
+    return (
+        f"attempt {attempt_number}: discard | {clean_history_text(description, fallback='candidate edit')} | "
+        f"{candidate_score:.6f} vs {baseline_score:.6f}"
+    )
+
+
 def run_agent(
     prompt: str,
     tool: str,
@@ -648,6 +1076,124 @@ def run_agent(
         reasoning_effort=reasoning_effort,
     )
     return usage
+
+
+def build_todo_review_prompt(
+    *,
+    iteration: int,
+    scope: str,
+    description: str,
+    commit_id: str,
+    changed_files: Sequence[str],
+    previous_items: Sequence[Dict[str, object]],
+) -> str:
+    changed_summary = ", ".join(changed_files[:8]) if changed_files else "none"
+    prior_payload = json.dumps(list(previous_items)[:8], indent=2)
+    return (
+        "You are a fast post-iteration quality reviewer for an autonomous app-improvement loop.\n"
+        "Inspect the current codebase and decide whether the shipped work is complete, real, and worth trusting.\n"
+        "Look for concrete gaps such as placeholder UI, labels without behavior, features described more strongly than the code supports, incomplete flows, and work that feels half-finished.\n"
+        "Carry forward old TODO debt unless the current code clearly fixed it.\n"
+        "Use plain human language. Keep items concrete, short, and actionable.\n"
+        "Return JSON only. No prose outside JSON.\n"
+        "Use this exact shape:\n"
+        "{\n"
+        '  "summary": "short plain-language summary",\n'
+        '  "items": [\n'
+        '    {"text": "short concrete debt item", "done": false, "files": ["path/one", "path/two"]}\n'
+        "  ]\n"
+        "}\n"
+        "Rules:\n"
+        "- Keep at most 6 items total.\n"
+        "- Mark done true only if the current code clearly fixed that debt.\n"
+        "- Prefer 0 items over filler.\n"
+        "- Do not complain about style unless it affects completeness, trust, or quality.\n"
+        "- Focus extra hard on whether the change is real behavior or just boxes, labels, and claims.\n\n"
+        f"Iteration: {iteration}\n"
+        f"Commit: {commit_id}\n"
+        f"Scope: {scope}\n"
+        f"Claimed change: {description}\n"
+        f"Changed files: {changed_summary}\n"
+        f"Existing TODO debt:\n{prior_payload}\n"
+    )
+
+
+def review_kept_candidate(
+    *,
+    iteration: int,
+    scope: str,
+    description: str,
+    commit_id: str,
+    changed_files: Sequence[str],
+    tool: str,
+    model: Optional[str],
+    config: Dict[str, Any],
+) -> Tuple[List[str], Optional[Dict[str, object]]]:
+    ensure_todo_md()
+    previous_items = load_todo_items()
+    if not config.get("review_enabled", DEFAULT_REVIEW_ENABLED):
+        return [], None
+    review_model = clean_history_text(config.get("review_model", ""), fallback="") or model
+    reasoning_effort = clean_history_text(
+        config.get("review_reasoning_effort", DEFAULT_REVIEW_REASONING_EFFORT),
+        fallback=DEFAULT_REVIEW_REASONING_EFFORT,
+    ).lower()
+    timeout_seconds = int(config.get("review_timeout_seconds", TODO_REVIEW_TIMEOUT_SECONDS))
+    try:
+        raw_message, usage = run_agent_prompt(
+            build_todo_review_prompt(
+                iteration=iteration,
+                scope=scope,
+                description=description,
+                commit_id=commit_id,
+                changed_files=changed_files,
+                previous_items=previous_items,
+            ),
+            cwd=ROOT,
+            output_path=LAST_TODO_REVIEW_MESSAGE,
+            model=review_model,
+            tool=tool,
+            timeout_seconds=timeout_seconds,
+            available_tools=("rg", "view", "glob"),
+            silent=True,
+            stream_mode="off",
+            reasoning_effort=reasoning_effort,
+        )
+        payload = extract_json_object(raw_message)
+        raw_items = payload.get("items", [])
+        reviewed_items: List[Dict[str, object]] = []
+        if isinstance(raw_items, list):
+            for item in raw_items[:6]:
+                if not isinstance(item, dict):
+                    continue
+                text = sanitize_todo_text(str(item.get("text", "")))
+                if not text:
+                    continue
+                files = (
+                    [
+                        clean_history_text(str(value), fallback="")
+                        for value in item.get("files", [])
+                        if clean_history_text(str(value), fallback="")
+                    ]
+                    if isinstance(item.get("files"), list)
+                    else []
+                )
+                reviewed_items.append(
+                    {
+                        "done": bool(item.get("done")),
+                        "text": text,
+                        "files": files[:4],
+                    }
+                )
+        summary = clean_history_text(payload.get("summary", ""), fallback="")
+        write_todo_items(reviewed_items, summary=summary)
+        open_items = [format_todo_item(item) for item in reviewed_items if not bool(item.get("done"))]
+        if open_items:
+            return [f"review debt recorded: {len(open_items)} open item(s)"] + open_items, usage
+        return [summary or "review says the kept work looks complete enough to trust."], usage
+    except Exception as exc:
+        write_todo_items(previous_items, summary="Review pass failed; carrying forward prior debt unchanged.")
+        return [f"review pass failed; kept prior TODO debt unchanged ({clean_history_text(str(exc), fallback='review parse failure')})"], None
 
 
 def enable_ansi_colors() -> bool:
@@ -940,6 +1486,7 @@ def append_result(
     description: str,
 ) -> None:
     ensure_results_tsv()
+    ensure_todo_md()
     with RESULTS_PATH.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t")
         writer.writerow(
@@ -1104,6 +1651,8 @@ def run_single_iteration(
     model: Optional[str],
     cumulative: Dict[str, int],
     baseline_state: Dict[str, object],
+    config: Dict[str, Any],
+    strategy_stats: Dict[str, Dict[str, float]],
 ) -> Dict[str, object]:
     t0 = time.monotonic()
     deadline_monotonic = t0 + ITERATION_HARD_TIMEOUT_SECONDS
@@ -1113,6 +1662,9 @@ def run_single_iteration(
     heartbeat.set_stage("baseline evaluation")
 
     try:
+        preflight_note = auto_handle_dirty_tree(config)
+        if preflight_note:
+            console_print(f"[preflight] {preflight_note}", tone="yellow")
         ensure_clean_tree()
         start_commit = run_command(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT).stdout.strip()
         cached_report = baseline_state.get("report")
@@ -1154,6 +1706,7 @@ def run_single_iteration(
             "iteration": iteration,
             "status": "crash",
             "fatal": False,
+            "scope": "baseline",
             "baseline_score_pct": "n/a",
             "candidate_score_pct": "n/a",
             "commit": DUMMY_COMMIT,
@@ -1177,109 +1730,475 @@ def run_single_iteration(
         heartbeat.stop()
         return summary
 
-    try:
-        heartbeat.set_stage("agent implementation")
-        agent_usage = run_agent(
-            build_prompt(baseline),
-            tool,
-            model,
-            timeout_seconds=compute_agent_timeout(deadline_monotonic=deadline_monotonic),
-            reasoning_effort="xhigh",
-        )
-    except RuntimeError as exc:
-        cumulative["crash"] += 1
-        append_result(iteration, DUMMY_COMMIT, baseline_score, baseline_score, 0.0, 0.0, "crash", "agent", [], str(exc))
-        reflection_text = write_failure_reflection(
-            iteration=iteration,
-            status="crash",
-            scope="agent",
-            description=str(exc),
-            baseline_score=f"{baseline_score:.6f}",
-            candidate_score="n/a",
-            error=str(exc),
-            changed_files=[],
-            agent_decisions=[],
-            tool=tool,
-            model=model,
-        )
-        summary = {
-            "iteration": iteration,
-            "status": "crash",
-            "fatal": False,
-            "baseline_score_pct": f"{baseline_score:.6f}",
-            "candidate_score_pct": "n/a",
-            "commit": DUMMY_COMMIT,
-            "error": str(exc),
-            "elapsed_seconds": f"{time.monotonic() - t0:.1f}",
-        }
-        print_iteration_report(
-            iteration=iteration,
-            total_iterations=total_iterations,
-            status="crash",
-            baseline_score=f"{baseline_score:.6f}",
-            candidate_score="n/a",
-            score_delta="n/a",
-            scope="agent",
-            description=str(exc),
-            commit_id=DUMMY_COMMIT,
-            elapsed_seconds=f"{time.monotonic() - t0:.1f}",
-        )
-        print_section("reflection", [reflection_text])
-        print_summary(summary)
-        heartbeat.stop()
-        return summary
-
-    changed_entries = parse_status_entries(cwd=ROOT)
-    heartbeat.set_stage("candidate inspection")
-    allowed_changed, invalid_changed = classify_candidate_diff(changed_entries)
-    changed_files = relative_paths(allowed_changed)
-    invalid_files = relative_paths(invalid_changed)
-    candidate_file_buckets = classify_file_changes(allowed_changed)
-    all_changed_file_buckets = classify_file_changes(changed_entries)
-    scope, description = parse_agent_message()
-    agent_decisions = parse_agent_decisions()
     baseline_usage = baseline.get("copilot_usage")
+    usage_blocks: List[Optional[Dict[str, object]]] = [baseline_usage]
+    retry_feedback = ""
+    retry_summaries: List[str] = []
+    attempt_number = 1
+    tried_strategy_ids: List[str] = []
 
-    if invalid_changed or not allowed_changed:
-        description = "no valid app changes produced"
-        if invalid_changed:
-            description = format_invalid_scope(invalid_changed)
-        elif is_discovery_only_attempt(agent_decisions):
-            description = (
-                "no valid app changes produced after a discovery-only attempt; form one stronger hypothesis "
-                "and avoid repeated list/read/search loops that never converge to a shipped patch"
+    while True:
+        current_strategy_arm = choose_strategy_arm(config, strategy_stats, tried_ids=tried_strategy_ids)
+        tried_strategy_ids.append(str(current_strategy_arm["id"]))
+        try:
+            heartbeat.set_stage("agent implementation")
+            agent_usage = run_agent(
+                build_prompt(
+                    baseline,
+                    retry_feedback=retry_feedback,
+                    attempt_number=attempt_number,
+                    strategy_arm=current_strategy_arm,
+                    config=config,
+                ),
+                tool,
+                model,
+                timeout_seconds=compute_agent_timeout(deadline_monotonic=deadline_monotonic),
+                reasoning_effort="xhigh",
             )
-        restore_entries(start_commit, changed_entries, cwd=ROOT)
-        cumulative["discard"] += 1
-        append_result(iteration, DUMMY_COMMIT, baseline_score, baseline_score, 0.0, 0.0, "discard", scope, invalid_files, description)
-        reflection_text = write_failure_reflection(
-            iteration=iteration,
-            status="discard",
-            scope=scope,
-            description=description,
-            baseline_score=f"{baseline_score:.6f}",
-            candidate_score="n/a",
-            error="",
-            changed_files=invalid_files,
-            agent_decisions=agent_decisions,
-            tool=tool,
-            model=model,
-        )
-        print_file_sections(all_changed_file_buckets)
-        if invalid_files:
-            print_section("invalid files", invalid_files)
+            usage_blocks.append(agent_usage)
+        except RuntimeError as exc:
+            if can_retry_within_iteration(attempt_number=attempt_number, deadline_monotonic=deadline_monotonic):
+                update_strategy_stats(
+                    strategy_stats,
+                    arm_id=str(current_strategy_arm["id"]),
+                    baseline_score=baseline_score,
+                    status="crash",
+                )
+                save_strategy_stats(strategy_stats)
+                retry_summaries.append(
+                    summarize_same_iteration_retry(
+                        attempt_number=attempt_number,
+                        status="crash",
+                        description=f"[{current_strategy_arm['id']}] {exc}",
+                        baseline_score=baseline_score,
+                        error=str(exc),
+                    )
+                )
+                retry_feedback = build_same_iteration_retry_feedback(
+                    status="crash",
+                    baseline_score=baseline_score,
+                    description=str(exc),
+                    scope="agent",
+                    changed_files=[],
+                    error=str(exc),
+                )
+                console_print(
+                    f"[retry] attempt {attempt_number} ({current_strategy_arm['id']}) crashed before scoring; taking another swing inside this iteration",
+                    tone="yellow",
+                )
+                attempt_number += 1
+                continue
+
+            update_strategy_stats(
+                strategy_stats,
+                arm_id=str(current_strategy_arm["id"]),
+                baseline_score=baseline_score,
+                status="crash",
+            )
+            save_strategy_stats(strategy_stats)
+            cumulative["crash"] += 1
+            append_result(iteration, DUMMY_COMMIT, baseline_score, baseline_score, 0.0, 0.0, "crash", "agent", [], str(exc))
+            reflection_text = write_failure_reflection(
+                iteration=iteration,
+                status="crash",
+                scope="agent",
+                description=str(exc),
+                baseline_score=f"{baseline_score:.6f}",
+                candidate_score="n/a",
+                error=str(exc),
+                changed_files=[],
+                agent_decisions=[],
+                tool=tool,
+                model=model,
+            )
+            summary = {
+                "iteration": iteration,
+                "status": "crash",
+                "fatal": False,
+                "baseline_score_pct": f"{baseline_score:.6f}",
+                "candidate_score_pct": "n/a",
+                "commit": DUMMY_COMMIT,
+                "error": str(exc),
+                "elapsed_seconds": f"{time.monotonic() - t0:.1f}",
+            }
+            print_iteration_report(
+                iteration=iteration,
+                total_iterations=total_iterations,
+                status="crash",
+                baseline_score=f"{baseline_score:.6f}",
+                candidate_score="n/a",
+                score_delta="n/a",
+                scope="agent",
+                description=str(exc),
+                commit_id=DUMMY_COMMIT,
+                elapsed_seconds=f"{time.monotonic() - t0:.1f}",
+            )
+            if retry_summaries:
+                print_section("same-iteration retries", retry_summaries)
+            print_section("reflection", [reflection_text])
+            print_copilot_usage("copilot usage", combine_usage(*usage_blocks))
+            print_summary(summary)
+            heartbeat.stop()
+            return summary
+
+        changed_entries = parse_status_entries(cwd=ROOT)
+        heartbeat.set_stage("candidate inspection")
+        allowed_changed, invalid_changed = classify_candidate_diff(changed_entries)
+        changed_files = relative_paths(allowed_changed)
+        invalid_files = relative_paths(invalid_changed)
+        candidate_file_buckets = classify_file_changes(allowed_changed)
+        all_changed_file_buckets = classify_file_changes(changed_entries)
+        scope, description = parse_agent_message()
+        agent_decisions = parse_agent_decisions()
+
+        if invalid_changed or not allowed_changed:
+            description = "no valid app changes produced"
+            if invalid_changed:
+                description = format_invalid_scope(invalid_changed)
+            elif is_discovery_only_attempt(agent_decisions):
+                description = (
+                    "no valid app changes produced after a discovery-only attempt; form one stronger hypothesis "
+                    "and avoid repeated list/read/search loops that never converge to a shipped patch"
+                )
+            if can_retry_within_iteration(attempt_number=attempt_number, deadline_monotonic=deadline_monotonic):
+                restore_entries(start_commit, changed_entries, cwd=ROOT)
+                update_strategy_stats(
+                    strategy_stats,
+                    arm_id=str(current_strategy_arm["id"]),
+                    baseline_score=baseline_score,
+                    status="discard",
+                    score_delta=0.0,
+                )
+                save_strategy_stats(strategy_stats)
+                retry_summaries.append(
+                    summarize_same_iteration_retry(
+                        attempt_number=attempt_number,
+                        status="discard",
+                        description=f"[{current_strategy_arm['id']}] {description}",
+                        baseline_score=baseline_score,
+                    )
+                )
+                retry_feedback = build_same_iteration_retry_feedback(
+                    status="discard",
+                    baseline_score=baseline_score,
+                    description=description,
+                    scope=scope,
+                    changed_files=invalid_files,
+                )
+                console_print(
+                    f"[retry] attempt {attempt_number} ({current_strategy_arm['id']}) produced no valid candidate; taking another swing inside this iteration",
+                    tone="yellow",
+                )
+                attempt_number += 1
+                continue
+
+            restore_entries(start_commit, changed_entries, cwd=ROOT)
+            update_strategy_stats(
+                strategy_stats,
+                arm_id=str(current_strategy_arm["id"]),
+                baseline_score=baseline_score,
+                status="discard",
+                score_delta=0.0,
+            )
+            save_strategy_stats(strategy_stats)
+            cumulative["discard"] += 1
+            append_result(iteration, DUMMY_COMMIT, baseline_score, baseline_score, 0.0, 0.0, "discard", scope, invalid_files, description)
+            reflection_text = write_failure_reflection(
+                iteration=iteration,
+                status="discard",
+                scope=scope,
+                description=description,
+                baseline_score=f"{baseline_score:.6f}",
+                candidate_score="n/a",
+                error="",
+                changed_files=invalid_files,
+                agent_decisions=agent_decisions,
+                tool=tool,
+                model=model,
+            )
+            print_file_sections(all_changed_file_buckets)
+            if invalid_files:
+                print_section("invalid files", invalid_files)
+            print_section("agent decisions", agent_decisions)
+            if retry_summaries:
+                print_section("same-iteration retries", retry_summaries)
+            print_section("reflection", [reflection_text])
+            print_copilot_usage("copilot usage", combine_usage(*usage_blocks))
+            summary = {
+                "iteration": iteration,
+                "status": "discard",
+                "fatal": False,
+                "baseline_score_pct": f"{baseline_score:.6f}",
+                "candidate_score_pct": "n/a",
+                "outcome": "no valid candidate patch; changes were discarded and the worktree was restored",
+                "commit": DUMMY_COMMIT,
+                "elapsed_seconds": f"{time.monotonic() - t0:.1f}",
+                "cumulative_keep": cumulative["keep"],
+                "cumulative_discard": cumulative["discard"],
+                "cumulative_crash": cumulative["crash"],
+            }
+            print_iteration_report(
+                iteration=iteration,
+                total_iterations=total_iterations,
+                status="discard",
+                baseline_score=f"{baseline_score:.6f}",
+                candidate_score="n/a",
+                score_delta="0.000000",
+                scope=scope,
+                description=description,
+                commit_id=DUMMY_COMMIT,
+                elapsed_seconds=f"{time.monotonic() - t0:.1f}",
+                file_buckets=all_changed_file_buckets,
+            )
+            print_summary(summary)
+            heartbeat.stop()
+            return summary
+
+        try:
+            heartbeat.set_stage("candidate evaluation")
+            candidate = evaluate_worktree(
+                backend=backend,
+                tool=tool,
+                model=model,
+                deadline_monotonic=deadline_monotonic,
+                require_nonzero_delta=True,
+            )
+        except Exception as exc:
+            restore_entries(start_commit, allowed_changed, cwd=ROOT)
+            if can_retry_within_iteration(attempt_number=attempt_number, deadline_monotonic=deadline_monotonic):
+                update_strategy_stats(
+                    strategy_stats,
+                    arm_id=str(current_strategy_arm["id"]),
+                    baseline_score=baseline_score,
+                    status="crash",
+                )
+                save_strategy_stats(strategy_stats)
+                retry_summaries.append(
+                    summarize_same_iteration_retry(
+                        attempt_number=attempt_number,
+                        status="crash",
+                        description=f"[{current_strategy_arm['id']}] {description}",
+                        baseline_score=baseline_score,
+                        error=str(exc),
+                    )
+                )
+                retry_feedback = build_same_iteration_retry_feedback(
+                    status="crash",
+                    baseline_score=baseline_score,
+                    description=description,
+                    scope=scope,
+                    changed_files=changed_files,
+                    error=str(exc),
+                )
+                console_print(
+                    f"[retry] attempt {attempt_number} ({current_strategy_arm['id']}) failed verification; taking another swing inside this iteration",
+                    tone="yellow",
+                )
+                attempt_number += 1
+                continue
+
+            update_strategy_stats(
+                strategy_stats,
+                arm_id=str(current_strategy_arm["id"]),
+                baseline_score=baseline_score,
+                status="crash",
+            )
+            save_strategy_stats(strategy_stats)
+            cumulative["crash"] += 1
+            append_result(iteration, DUMMY_COMMIT, baseline_score, baseline_score, 0.0, 0.0, "crash", scope, changed_files, str(exc))
+            reflection_text = write_failure_reflection(
+                iteration=iteration,
+                status="crash",
+                scope=scope,
+                description=description,
+                baseline_score=f"{baseline_score:.6f}",
+                candidate_score="n/a",
+                error=str(exc),
+                changed_files=changed_files,
+                agent_decisions=agent_decisions,
+                tool=tool,
+                model=model,
+            )
+            print_file_sections(candidate_file_buckets)
+            print_section("agent decisions", agent_decisions)
+            if retry_summaries:
+                print_section("same-iteration retries", retry_summaries)
+            print_section("reflection", [reflection_text])
+            print_copilot_usage("copilot usage", combine_usage(*usage_blocks))
+            summary = {
+                "iteration": iteration,
+                "status": "crash",
+                "fatal": False,
+                "baseline_score_pct": f"{baseline_score:.6f}",
+                "candidate_score_pct": "n/a",
+                "commit": DUMMY_COMMIT,
+                "error": str(exc),
+                "elapsed_seconds": f"{time.monotonic() - t0:.1f}",
+            }
+            print_iteration_report(
+                iteration=iteration,
+                total_iterations=total_iterations,
+                status="crash",
+                baseline_score=f"{baseline_score:.6f}",
+                candidate_score="n/a",
+                score_delta="n/a",
+                scope=scope,
+                description=str(exc),
+                commit_id=DUMMY_COMMIT,
+                elapsed_seconds=f"{time.monotonic() - t0:.1f}",
+                file_buckets=candidate_file_buckets,
+            )
+            print_summary(summary)
+            heartbeat.stop()
+            return summary
+
+        candidate_usage = candidate.get("copilot_usage")
+        usage_blocks.append(candidate_usage)
+        candidate_score = score_pct(candidate)
+        candidate_signal = assessment_signal(candidate)
+        score_delta = candidate_score - baseline_score
+        status = "keep" if score_delta > 0 else "discard"
+
+        if status != "keep" and can_retry_within_iteration(attempt_number=attempt_number, deadline_monotonic=deadline_monotonic):
+            restore_entries(start_commit, allowed_changed, cwd=ROOT)
+            update_strategy_stats(
+                strategy_stats,
+                arm_id=str(current_strategy_arm["id"]),
+                baseline_score=baseline_score,
+                status="discard",
+                score_delta=score_delta,
+            )
+            save_strategy_stats(strategy_stats)
+            retry_summaries.append(
+                summarize_same_iteration_retry(
+                    attempt_number=attempt_number,
+                    status="discard",
+                    description=f"[{current_strategy_arm['id']}] {description}",
+                    baseline_score=baseline_score,
+                    candidate_score=candidate_score,
+                )
+            )
+            retry_feedback = build_same_iteration_retry_feedback(
+                status="discard",
+                baseline_score=baseline_score,
+                description=description,
+                scope=scope,
+                changed_files=changed_files,
+                candidate_score=candidate_score,
+                candidate_report=candidate,
+            )
+            console_print(
+                f"[retry] attempt {attempt_number} ({current_strategy_arm['id']}) scored {candidate_score:.6f} against {baseline_score:.6f}; taking another swing inside this iteration",
+                tone="yellow",
+            )
+            attempt_number += 1
+            continue
+
+        heartbeat.set_stage("finalizing iteration")
+        todo_review_lines: List[str] = []
+        if status == "keep":
+            update_strategy_stats(
+                strategy_stats,
+                arm_id=str(current_strategy_arm["id"]),
+                baseline_score=baseline_score,
+                status="keep",
+                score_delta=score_delta,
+            )
+            save_strategy_stats(strategy_stats)
+            commit_id = commit_candidate(allowed_changed, scope, description)
+            baseline_state["commit"] = commit_id
+            baseline_state["report"] = candidate
+            cumulative["keep"] += 1
+            append_result(
+                iteration,
+                commit_id,
+                baseline_score,
+                candidate_score,
+                score_delta,
+                candidate_signal,
+                status,
+                scope,
+                changed_files,
+                description,
+            )
+            todo_review_lines, review_usage = review_kept_candidate(
+                iteration=iteration,
+                scope=scope,
+                description=description,
+                commit_id=commit_id,
+                changed_files=changed_files,
+                tool=tool,
+                model=model,
+                config=config,
+            )
+            if review_usage:
+                usage_blocks.append(review_usage)
+        else:
+            restore_entries(start_commit, allowed_changed, cwd=ROOT)
+            update_strategy_stats(
+                strategy_stats,
+                arm_id=str(current_strategy_arm["id"]),
+                baseline_score=baseline_score,
+                status="discard",
+                score_delta=score_delta,
+            )
+            save_strategy_stats(strategy_stats)
+            commit_id = DUMMY_COMMIT
+            cumulative["discard"] += 1
+            append_result(
+                iteration,
+                commit_id,
+                baseline_score,
+                candidate_score,
+                score_delta,
+                candidate_signal,
+                status,
+                scope,
+                changed_files,
+                description,
+            )
+            reflection_text = write_failure_reflection(
+                iteration=iteration,
+                status="discard",
+                scope=scope,
+                description=description,
+                baseline_score=f"{baseline_score:.6f}",
+                candidate_score=f"{candidate_score:.6f}",
+                error="",
+                changed_files=changed_files,
+                agent_decisions=agent_decisions,
+                tool=tool,
+                model=model,
+                candidate_report=candidate,
+            )
+
+        total_usage = combine_usage(*usage_blocks)
+        print_file_sections(candidate_file_buckets)
         print_section("agent decisions", agent_decisions)
-        print_section("reflection", [reflection_text])
-        print_copilot_usage("copilot usage", combine_usage(baseline_usage, agent_usage))
+        if retry_summaries:
+            print_section("same-iteration retries", retry_summaries)
+        if todo_review_lines:
+            print_section("todo review", todo_review_lines)
+        if status != "keep":
+            print_section("reflection", [reflection_text])
+        print_copilot_usage("copilot usage", total_usage)
+
         summary = {
             "iteration": iteration,
-            "status": "discard",
+            "status": status,
             "fatal": False,
             "baseline_score_pct": f"{baseline_score:.6f}",
-            "candidate_score_pct": "n/a",
-            "outcome": "no valid candidate patch; changes were discarded and the worktree was restored",
-            "commit": DUMMY_COMMIT,
+            "candidate_score_pct": f"{candidate_score:.6f}",
+            "score_delta": f"{score_delta:.6f}",
+            "candidate_signal": f"{candidate_signal:.6f}",
+            "gate": candidate["measurement"]["g"],
+            "scope": scope,
+            "description": description,
+            "outcome": outcome_line(status, score_delta, commit_id),
+            "commit": commit_id,
             "elapsed_seconds": f"{time.monotonic() - t0:.1f}",
+            "backend": candidate["scorer_backend"],
+            "tool": tool,
             "cumulative_keep": cumulative["keep"],
             "cumulative_discard": cumulative["discard"],
             "cumulative_crash": cumulative["crash"],
@@ -1287,175 +2206,19 @@ def run_single_iteration(
         print_iteration_report(
             iteration=iteration,
             total_iterations=total_iterations,
-            status="discard",
+            status=status,
             baseline_score=f"{baseline_score:.6f}",
-            candidate_score="n/a",
-            score_delta="0.000000",
+            candidate_score=f"{candidate_score:.6f}",
+            score_delta=f"{score_delta:.6f}",
             scope=scope,
             description=description,
-            commit_id=DUMMY_COMMIT,
-            elapsed_seconds=f"{time.monotonic() - t0:.1f}",
-            file_buckets=all_changed_file_buckets,
-        )
-        print_summary(summary)
-        heartbeat.stop()
-        return summary
-
-    try:
-        heartbeat.set_stage("candidate evaluation")
-        candidate = evaluate_worktree(
-            backend=backend,
-            tool=tool,
-            model=model,
-            deadline_monotonic=deadline_monotonic,
-            require_nonzero_delta=True,
-        )
-    except Exception as exc:
-        restore_entries(start_commit, allowed_changed, cwd=ROOT)
-        cumulative["crash"] += 1
-        append_result(iteration, DUMMY_COMMIT, baseline_score, baseline_score, 0.0, 0.0, "crash", scope, changed_files, str(exc))
-        reflection_text = write_failure_reflection(
-            iteration=iteration,
-            status="crash",
-            scope=scope,
-            description=description,
-            baseline_score=f"{baseline_score:.6f}",
-            candidate_score="n/a",
-            error=str(exc),
-            changed_files=changed_files,
-            agent_decisions=agent_decisions,
-            tool=tool,
-            model=model,
-        )
-        print_file_sections(candidate_file_buckets)
-        print_section("agent decisions", agent_decisions)
-        print_section("reflection", [reflection_text])
-        print_copilot_usage("copilot usage", combine_usage(baseline_usage, agent_usage))
-        summary = {
-            "iteration": iteration,
-            "status": "crash",
-            "fatal": False,
-            "baseline_score_pct": f"{baseline_score:.6f}",
-            "candidate_score_pct": "n/a",
-            "commit": DUMMY_COMMIT,
-            "error": str(exc),
-            "elapsed_seconds": f"{time.monotonic() - t0:.1f}",
-        }
-        print_iteration_report(
-            iteration=iteration,
-            total_iterations=total_iterations,
-            status="crash",
-            baseline_score=f"{baseline_score:.6f}",
-            candidate_score="n/a",
-            score_delta="n/a",
-            scope=scope,
-            description=str(exc),
-            commit_id=DUMMY_COMMIT,
+            commit_id=commit_id,
             elapsed_seconds=f"{time.monotonic() - t0:.1f}",
             file_buckets=candidate_file_buckets,
         )
         print_summary(summary)
         heartbeat.stop()
         return summary
-
-    candidate_score = score_pct(candidate)
-    candidate_signal = assessment_signal(candidate)
-    score_delta = candidate_score - baseline_score
-    status = "keep" if score_delta > 0 else "discard"
-    candidate_usage = candidate.get("copilot_usage")
-    total_usage = combine_usage(baseline_usage, agent_usage, candidate_usage)
-
-    heartbeat.set_stage("finalizing iteration")
-    if status == "keep":
-        commit_id = commit_candidate(allowed_changed, scope, description)
-        baseline_state["commit"] = commit_id
-        baseline_state["report"] = candidate
-        cumulative["keep"] += 1
-        append_result(
-            iteration,
-            commit_id,
-            baseline_score,
-            candidate_score,
-            score_delta,
-            candidate_signal,
-            status,
-            scope,
-            changed_files,
-            description,
-        )
-    else:
-        restore_entries(start_commit, allowed_changed, cwd=ROOT)
-        commit_id = DUMMY_COMMIT
-        cumulative["discard"] += 1
-        append_result(
-            iteration,
-            commit_id,
-            baseline_score,
-            candidate_score,
-            score_delta,
-            candidate_signal,
-            status,
-            scope,
-            changed_files,
-            description,
-        )
-        reflection_text = write_failure_reflection(
-            iteration=iteration,
-            status="discard",
-            scope=scope,
-            description=description,
-            baseline_score=f"{baseline_score:.6f}",
-            candidate_score=f"{candidate_score:.6f}",
-            error="",
-            changed_files=changed_files,
-            agent_decisions=agent_decisions,
-            tool=tool,
-            model=model,
-            candidate_report=candidate,
-        )
-
-    print_file_sections(candidate_file_buckets)
-    print_section("agent decisions", agent_decisions)
-    if status != "keep":
-        print_section("reflection", [reflection_text])
-    print_copilot_usage("copilot usage", total_usage)
-
-    summary = {
-        "iteration": iteration,
-        "status": status,
-        "fatal": False,
-        "baseline_score_pct": f"{baseline_score:.6f}",
-        "candidate_score_pct": f"{candidate_score:.6f}",
-        "score_delta": f"{score_delta:.6f}",
-        "candidate_signal": f"{candidate_signal:.6f}",
-        "gate": candidate["measurement"]["g"],
-        "scope": scope,
-        "description": description,
-        "outcome": outcome_line(status, score_delta, commit_id),
-        "commit": commit_id,
-        "elapsed_seconds": f"{time.monotonic() - t0:.1f}",
-        "backend": candidate["scorer_backend"],
-        "tool": tool,
-        "cumulative_keep": cumulative["keep"],
-        "cumulative_discard": cumulative["discard"],
-        "cumulative_crash": cumulative["crash"],
-    }
-    print_iteration_report(
-        iteration=iteration,
-        total_iterations=total_iterations,
-        status=status,
-        baseline_score=f"{baseline_score:.6f}",
-        candidate_score=f"{candidate_score:.6f}",
-        score_delta=f"{score_delta:.6f}",
-        scope=scope,
-        description=description,
-        commit_id=commit_id,
-        elapsed_seconds=f"{time.monotonic() - t0:.1f}",
-        file_buckets=candidate_file_buckets,
-    )
-    print_summary(summary)
-    heartbeat.stop()
-    return summary
 
 
 def main() -> None:
@@ -1487,11 +2250,19 @@ def main() -> None:
     if args.forever and args.iterations != 1:
         raise SystemExit("Use either --iterations N or --forever, not both.")
 
+    config = load_runner_config()
+    preflight_note = auto_handle_dirty_tree(config)
+    if preflight_note:
+        console_print(f"[preflight] {preflight_note}", tone="yellow")
+
     ensure_results_tsv()
     total_iterations = None if args.forever else args.iterations
     iteration = 1
     cumulative = {"keep": 0, "discard": 0, "crash": 0}
     baseline_state: Dict[str, object] = {}
+    strategy_stats = load_strategy_stats(config)
+    repeated_baseline_failures = 0
+    last_baseline_error = ""
     try:
         while True:
             summary = run_single_iteration(
@@ -1502,7 +2273,25 @@ def main() -> None:
                 model=args.model,
                 cumulative=cumulative,
                 baseline_state=baseline_state,
+                config=config,
+                strategy_stats=strategy_stats,
             )
+            if summary.get("status") == "crash" and summary.get("scope") == "baseline":
+                current_error = clean_history_text(summary.get("error", ""), fallback="baseline failure")
+                if current_error == last_baseline_error:
+                    repeated_baseline_failures += 1
+                else:
+                    last_baseline_error = current_error
+                    repeated_baseline_failures = 1
+                if repeated_baseline_failures >= int(config["baseline_failure_abort_threshold"]):
+                    console_print(
+                        f"[abort] baseline failed {repeated_baseline_failures} times in a row with the same error; stopping the run",
+                        tone="red",
+                    )
+                    raise SystemExit(1)
+            else:
+                repeated_baseline_failures = 0
+                last_baseline_error = ""
             if summary.get("fatal"):
                 raise SystemExit(1)
             if total_iterations is not None and iteration >= total_iterations:

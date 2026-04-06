@@ -37,6 +37,9 @@ EPSILON = 1e-9
 MIN_DIMENSION_EFFECTIVE_WEIGHT = 0.35
 DIMENSION_WEIGHT_EXPONENT = 0.5
 DIMENSION_EVIDENCE_EXPONENT = 0.5
+RESCUE_SIGNED_DELTA = 0.01
+RESCUE_MIN_CONFIDENCE = 0.2
+RESCUE_MIN_OBSERVABILITY = 0.2
 
 PROTECTED_FILES = {
     "README.md",
@@ -45,6 +48,46 @@ PROTECTED_FILES = {
     "program.md",
     "train.py",
 }
+
+STATIC_MANDATORY_CRITERIA = [
+    {
+        "id": "build-success",
+        "description": "All configured build and test commands complete successfully.",
+    },
+    {
+        "id": "core-purpose-intact",
+        "description": "The app remains coherent, usable, and recognizably aligned with its core purpose.",
+    },
+    {
+        "id": "data-and-state-safe",
+        "description": "Changes must not obviously damage saved data, continuity, or state restoration.",
+    },
+]
+
+STATIC_DIMENSION_SPECS = [
+    {"id": "core-task-effectiveness", "description": "How well the app helps users accomplish its main job.", "w": 0.10, "default_anchor": "Baseline frozen at run start for how well the app helps users accomplish its main job."},
+    {"id": "workflow-efficiency", "description": "How little friction, repetition, and wasted effort the main workflow requires.", "w": 0.08, "default_anchor": "Baseline frozen at run start for workflow friction, repetition, and effort."},
+    {"id": "navigation-clarity", "description": "How easy it is to know where to go and how to move through the app.", "w": 0.05, "default_anchor": "Baseline frozen at run start for wayfinding, movement, and navigation clarity."},
+    {"id": "information-hierarchy", "description": "How clearly the app emphasizes the most important information first.", "w": 0.05, "default_anchor": "Baseline frozen at run start for how well the interface emphasizes what matters most."},
+    {"id": "scanability", "description": "How quickly a user can scan a screen and understand what matters.", "w": 0.05, "default_anchor": "Baseline frozen at run start for how quickly important information can be scanned and understood."},
+    {"id": "interaction-clarity", "description": "How obvious the app's controls, actions, and next steps are.", "w": 0.05, "default_anchor": "Baseline frozen at run start for how obvious controls, actions, and next steps feel."},
+    {"id": "input-ergonomics", "description": "How easy forms, editing, and data entry feel in real use.", "w": 0.05, "default_anchor": "Baseline frozen at run start for form, editing, and data-entry ergonomics."},
+    {"id": "feedback-and-system-response", "description": "How clearly the app communicates status, progress, success, failure, and system response.", "w": 0.04, "default_anchor": "Baseline frozen at run start for status visibility, progress feedback, and response clarity."},
+    {"id": "visual-coherence", "description": "How consistent, intentional, and well-composed the visual system feels.", "w": 0.04, "default_anchor": "Baseline frozen at run start for visual consistency, composition, and design coherence."},
+    {"id": "brand-expression", "description": "How well the product's tone, personality, and design character come through.", "w": 0.03, "default_anchor": "Baseline frozen at run start for how clearly the product expresses its intended tone and character."},
+    {"id": "accessibility-and-inclusion", "description": "How usable the app is across different abilities, constraints, and environments.", "w": 0.04, "default_anchor": "Baseline frozen at run start for accessibility, inclusion, and adaptability to different user constraints."},
+    {"id": "performance-and-responsiveness", "description": "How fast, responsive, and lightweight the app feels.", "w": 0.06, "default_anchor": "Baseline frozen at run start for app speed, responsiveness, and perceived performance."},
+    {"id": "reliability-and-stability", "description": "How consistently the app works without errors, crashes, or broken states.", "w": 0.06, "default_anchor": "Baseline frozen at run start for runtime stability and freedom from broken behavior."},
+    {"id": "data-integrity-and-safety", "description": "How safely and correctly the app stores, retrieves, and preserves information.", "w": 0.06, "default_anchor": "Baseline frozen at run start for correctness, safety, and trustworthiness of stored information."},
+    {"id": "state-continuity-and-resume", "description": "How well the app preserves context across restart, reload, interruption, and resume.", "w": 0.05, "default_anchor": "Baseline frozen at run start for preserving context and resuming work after interruption or restart."},
+    {"id": "feature-usefulness", "description": "How valuable and meaningful the available capabilities actually are.", "w": 0.06, "default_anchor": "Baseline frozen at run start for how useful and meaningful the current capabilities feel."},
+    {"id": "ai-usefulness", "description": "Whether any AI capabilities provide meaningful help instead of noise.", "w": 0.04, "default_anchor": "Baseline frozen at run start for whether AI contributes real usefulness rather than decorative or noisy behavior."},
+    {"id": "ai-integration-quality", "description": "How naturally AI fits into the workflow, interface, and product identity.", "w": 0.03, "default_anchor": "Baseline frozen at run start for how naturally AI is integrated into workflow, interface, and product identity."},
+    {"id": "ai-trustworthiness-and-restraint", "description": "Whether AI behaves in a dependable, legible, non-gimmicky way and knows when not to intrude.", "w": 0.02, "default_anchor": "Baseline frozen at run start for whether AI feels dependable, legible, and appropriately restrained."},
+    {"id": "holistic-improvement", "description": "Whether the change forms one coherent, higher-quality improvement instead of many scattered small tweaks.", "w": 0.04, "default_anchor": "Baseline frozen at run start for how well the product hangs together as a coherent whole rather than a pile of disconnected tweaks."},
+]
+
+STATIC_DIMENSION_IDS = {row["id"] for row in STATIC_DIMENSION_SPECS}
 
 
 def discover_target_root() -> Path:
@@ -89,8 +132,9 @@ PROTECTED_PREFIXES = (
     "support_scripts/",
 )
 INTERNAL_STATE_FILES = {
-    "REFLECTION.json",
+    "REFLECTION.md",
     "results.tsv",
+    "TODO.md",
 }
 INTERNAL_STATE_PREFIXES = (
     ".autoresearch-cache/",
@@ -839,33 +883,25 @@ def default_benchmark_payload() -> Dict[str, Any]:
     repo_name = ROOT.name.replace("_", "-").replace(" ", "-").lower() or "app"
     app_name = ROOT.name.replace("-", " ").replace("_", " ").strip() or "Application"
     return {
-        "benchmark_id": f"{repo_name}-auto-v2",
+        "benchmark_id": f"{repo_name}-static-scorecard-v1",
         "app_name": app_name,
-        "feature_name": "Repo-inferred improvement benchmark",
-        "app_summary": f"Autogenerated repo-inferred benchmark for {app_name}.",
+        "feature_name": "Static multi-parameter application benchmark",
+        "app_summary": f"Autogenerated static multi-parameter benchmark for {app_name}.",
         "paths_of_interest": detect_paths_of_interest(),
         "notes": [
-            "Autogenerated hidden benchmark for this run.",
+            "Autogenerated hidden benchmark for this run using a fixed 20-parameter application scorecard.",
             "The harness and support assets are excluded from product scoring.",
         ],
         "build_commands": detect_build_commands(),
-        "mandatory_criteria": [
-            {
-                "id": "build-success",
-                "description": "All configured build and test commands complete successfully.",
-            },
-            {
-                "id": "core-flow-intact",
-                "description": "The app remains intact, coherent, and usable for its core purpose.",
-            },
-        ],
+        "mandatory_criteria": list(STATIC_MANDATORY_CRITERIA),
         "dimensions": [
             {
-                "id": "overall-repo-inferred-improvement",
-                "description": "Overall app improvement relative to the repository's own current identity, behavior, and quality bar.",
-                "baseline_anchor": "The frozen baseline is the repository state at benchmark synthesis time; later snapshots should be compared against that baseline rather than an external ideal.",
-                "w": 1.0,
+                "id": row["id"],
+                "description": row["description"],
+                "baseline_anchor": row["default_anchor"],
+                "w": row["w"],
             }
+            for row in STATIC_DIMENSION_SPECS
         ],
         "taus": {"k": 0.28, "p": 1.1, "h": 0.4, "d": 1.2, "m": 1.35, "r": 0.5},
         "persona_weights": [],
@@ -1010,6 +1046,31 @@ def normalize_dimension_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, A
     return [{**row, "w": row["w"] / total} for row in cleaned]
 
 
+def merge_static_dimension_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    anchor_overrides: Dict[str, str] = {}
+    for row in rows:
+        dimension_id = normalize_identifier(row.get("id", ""))
+        if dimension_id not in STATIC_DIMENSION_IDS:
+            continue
+        baseline_anchor = collapse_whitespace(
+            str(row.get("baseline_anchor", row.get("baseline_reference", "")))
+        )
+        if baseline_anchor:
+            anchor_overrides[dimension_id] = baseline_anchor
+
+    merged: List[Dict[str, Any]] = []
+    for spec in STATIC_DIMENSION_SPECS:
+        merged.append(
+            {
+                "id": spec["id"],
+                "description": spec["description"],
+                "baseline_anchor": anchor_overrides.get(spec["id"], spec["default_anchor"]),
+                "w": spec["w"],
+            }
+        )
+    return normalize_dimension_rows(merged)
+
+
 def sanitize_baseline(payload: Dict[str, Any]) -> Dict[str, int]:
     defaults = {"k": 24, "p": 10, "h": 2, "d": 0, "m": 8, "r": 4}
     cleaned: Dict[str, int] = {}
@@ -1104,14 +1165,7 @@ def sanitize_synthesized_benchmark_payload(payload: Dict[str, Any]) -> Dict[str,
         str(item).strip() for item in payload.get("build_commands", []) if str(item).strip()
     ] or defaults["build_commands"]
 
-    mandatory_criteria = []
-    for row in payload.get("mandatory_criteria", []):
-        criterion_id = normalize_identifier(row.get("id", ""))
-        description = collapse_whitespace(str(row.get("description", "")))
-        if criterion_id and description:
-            mandatory_criteria.append({"id": criterion_id, "description": description})
-    if not mandatory_criteria:
-        mandatory_criteria = defaults["mandatory_criteria"]
+    mandatory_criteria = list(defaults["mandatory_criteria"])
 
     taus = dict(defaults["taus"])
     raw_taus = payload.get("taus") or {}
@@ -1122,7 +1176,7 @@ def sanitize_synthesized_benchmark_payload(payload: Dict[str, Any]) -> Dict[str,
             value = float(taus[key])
         taus[key] = value if value > 0 else float(defaults["taus"][key])
 
-    dimensions = normalize_dimension_rows(payload.get("dimensions") or [])
+    dimensions = merge_static_dimension_rows(payload.get("dimensions") or [])
     raw_tasks = payload.get("tasks") or []
     persona_weights: List[Dict[str, Any]] = []
     tasks: List[Dict[str, Any]] = []
@@ -1150,11 +1204,23 @@ def sanitize_synthesized_benchmark_payload(payload: Dict[str, Any]) -> Dict[str,
 
 
 def build_benchmark_synthesis_prompt() -> str:
+    static_dimensions_json = json.dumps(
+        [
+            {
+                "id": row["id"],
+                "description": row["description"],
+                "baseline_anchor": row["default_anchor"],
+                "w": row["w"],
+            }
+            for row in STATIC_DIMENSION_SPECS
+        ],
+        indent=2,
+    )
     return (
         "You are defining a frozen evaluation benchmark for an autonomous app-improvement loop.\n\n"
-        "Inspect this repository and infer a compact, repo-specific benchmark that can be used to score future app improvements.\n"
+        "Inspect this repository and fill in a fixed 20-parameter benchmark that can be used to score future app improvements.\n"
         "This benchmark is for the evaluator only. It is not a product roadmap and it is not a backlog.\n"
-        "Freeze the repository's own notion of better, not your personal taste and not generic UX rails.\n"
+        "Freeze the repository's current baseline state across the fixed dimensions below. Do not invent new dimensions.\n"
         "If BRAND.md, ABOUT.md, or FEATURES.md exist, treat them as high-signal evidence about the app's current identity.\n"
         "If those files exist, they are usually enough to anchor the benchmark; only read a few targeted code or test files to confirm shipped behavior.\n"
         "Do not narrate your progress or emit interim updates. Inspect minimally, then output the final JSON object only.\n"
@@ -1162,21 +1228,20 @@ def build_benchmark_synthesis_prompt() -> str:
         "Rules:\n"
         "- Output JSON only. No markdown fences.\n"
         "- Emit compact JSON on a single line if possible.\n"
-        "- Be application-agnostic and infer from the actual repo.\n"
+        "- Be application-agnostic, but use the fixed scorecard below.\n"
         "- Ignore the loop harness itself: prepare.py, train.py, program.md, support_docs/, support_scripts/, and karpathy-files/ are not the product.\n"
-        "- Prefer 3 to 6 weighted dimensions.\n"
-        "- Each dimension must describe one stable, repo-inferred lens of improvement and include a concise baseline_anchor describing the current baseline state at benchmark freeze time.\n"
-        "- Make dimensions enduring lenses, not a checklist of today's exact implementation details.\n"
-        "- Write baseline_anchor as a short description of the current level or character for that lens, not an exhaustive inventory of every shipped behavior.\n"
-        "- Avoid dimensions or anchors that are so literal that small but real improvements would read as unchanged.\n"
-        "- Do not invent generic categories unless the repo genuinely supports them.\n"
-        "- Freeze only the benchmark lens: weighted dimensions, mandatory criteria, build commands, notes, and optional tau constants for legacy compatibility.\n"
-        "- Do not define a roadmap or desired future features.\n"
+        "- Use all 20 fixed dimensions exactly as given. Do not add, remove, rename, or reweight them.\n"
+        "- For each fixed dimension, write a concise baseline_anchor describing the current baseline state at benchmark freeze time.\n"
+        "- Keep baseline_anchor factual and broad enough that future real improvements can register as better or worse.\n"
+        "- Preserve the fixed mandatory criteria.\n"
+        "- You are freezing a baseline, not defining a roadmap or desired future features.\n"
         "- Build commands must be real commands appropriate for this repo.\n"
         "- If this is a Rust app, prefer cargo-based checks when supported by the repo.\n"
         "- Use forward slashes in JSON paths.\n"
         "- Stop as soon as you have enough evidence to write a stable benchmark.\n"
         "- Use reasonable defaults when something is ambiguous, but keep notes short and factual.\n\n"
+        "Fixed dimensions:\n"
+        f"{static_dimensions_json}\n\n"
         "Required JSON shape:\n"
         "{\n"
         '  "benchmark_id": "slug-v1",\n'
@@ -1192,9 +1257,9 @@ def build_benchmark_synthesis_prompt() -> str:
         '  "dimensions": [\n'
         "    {\n"
         '      "id": "dimension-id",\n'
-        '      "description": "Repo-inferred lens of improvement.",\n'
+        '      "description": "Use the fixed description exactly.",\n'
         '      "baseline_anchor": "Concise factual description of the current baseline state for this dimension.",\n'
-        '      "w": 0.35\n'
+        '      "w": 0.10\n'
         "    }\n"
         "  ],\n"
         '  "taus": {"k": 0.28, "p": 1.1, "h": 0.4, "d": 1.2, "m": 1.35, "r": 0.5},\n'
@@ -1228,6 +1293,12 @@ def synthesize_benchmark(
     return load_benchmark(CACHED_BENCHMARK_PATH)
 
 
+def benchmark_uses_static_scorecard(benchmark: Benchmark) -> bool:
+    if len(benchmark.dimensions) != len(STATIC_DIMENSION_SPECS):
+        return False
+    return {dimension.id for dimension in benchmark.dimensions} == STATIC_DIMENSION_IDS
+
+
 def get_active_benchmark(
     *,
     tool: str = DEFAULT_TOOL,
@@ -1240,7 +1311,7 @@ def get_active_benchmark(
     if CACHED_BENCHMARK_PATH.exists():
         try:
             cached_benchmark = load_benchmark(CACHED_BENCHMARK_PATH)
-            if cached_benchmark.dimensions:
+            if cached_benchmark.dimensions and benchmark_uses_static_scorecard(cached_benchmark):
                 return cached_benchmark, "cache"
             if not allow_synthesis:
                 return cached_benchmark, "cache"
@@ -1451,8 +1522,12 @@ def build_evaluator_prompt(benchmark: Benchmark, build_results: Sequence[Dict[st
             "- delta must be in [-1, 1], where positive means better than the frozen baseline anchor, 0 means no meaningful change, and negative means worse.\n"
             "- confidence and observability must be in [0, 1].\n"
             "- Treat each baseline_anchor as the frozen baseline level for that lens, not as a checklist requiring every named detail to move.\n"
+            "- A strong focused improvement in one dimension can deserve a large positive delta even if most other dimensions stay flat.\n"
+            "- A coherent multi-area improvement can earn positive deltas across multiple touched dimensions and also improve holistic-improvement.\n"
+            "- Do not reward scattered micro-tweaks as a strong holistic win. If the change feels fragmented, keep holistic-improvement at 0 or below.\n"
             "- If a candidate makes a real but limited improvement on a dimension, use a small positive delta instead of 0.\n"
-            "- Reserve delta = 0 for genuinely preserved or indeterminate behavior on that dimension.\n"
+            "- If a candidate adds complexity, noise, or churn without a clear upside, use a small negative delta instead of 0.\n"
+            "- Reserve delta = 0 only for a true no-op on that dimension.\n"
             "- Use the repo's own identity and evidence. Do not substitute generic UX categories or external taste.\n"
             "- Use only read/search tools if you need them. Never attempt to patch files.\n\n"
             "Frozen benchmark:\n"
@@ -1493,6 +1568,9 @@ def build_evaluator_prompt(benchmark: Benchmark, build_results: Sequence[Dict[st
         "- cosmic counts must be non-negative integers.\n"
         "- feature_rows must contain exactly one row for each frozen persona/task pair.\n"
         "- Each feature row must contain only k, p, h, d, m, r, and optional response_seconds_total.\n"
+        "- If the changed candidate weakly helps, reflect that with a small real improvement in the feature rows.\n"
+        "- If the changed candidate adds friction or churn, reflect that with a small real regression in the feature rows.\n"
+        "- Do not return a baseline copy for a changed passing candidate.\n"
         "- Use only read/search tools if you need them. Never attempt to patch files.\n\n"
         "Frozen benchmark:\n"
         f"{benchmark_json}\n\n"
@@ -1514,6 +1592,91 @@ def build_evaluator_prompt(benchmark: Benchmark, build_results: Sequence[Dict[st
         "}\n\n"
         "Unresolved output shape:\n"
         '{\n  "status": "unresolved",\n  "missing": ["..."]\n}\n'
+    )
+
+
+def build_discriminative_retry_prompt(benchmark: Benchmark, build_results: Sequence[Dict[str, Any]]) -> str:
+    base_prompt = build_evaluator_prompt(benchmark, build_results)
+    if benchmark.dimensions:
+        extra = (
+            "\nAdditional instruction for this retry:\n"
+            "- This snapshot is a changed candidate that already passed the gate.\n"
+            "- A fully all-zero dimension result is invalid for this retry.\n"
+            "- At least one dimension row must carry a non-zero signed delta.\n"
+            "- If the effect is subtle, use tiny signed deltas such as +/-0.01 to +/-0.05.\n"
+            "- If one dimension clearly moved a lot, say so with a real positive or negative delta instead of spreading tiny values everywhere.\n"
+            "- Reward holistic-improvement only when the change hangs together as one coherent stronger whole.\n"
+            "- If the change feels busier, noisier, or less useful, prefer a slight negative over zero.\n"
+        )
+    else:
+        extra = (
+            "\nAdditional instruction for this retry:\n"
+            "- This snapshot is a changed candidate that already passed the gate.\n"
+            "- Returning a baseline copy is invalid for this retry.\n"
+            "- At least one feature row must differ from the frozen baseline.\n"
+            "- If the effect is subtle, make a minimal but real change in the measured feature rows.\n"
+            "- If the change adds friction or pointless churn, reflect that as a slight regression instead of a baseline copy.\n"
+        )
+    return base_prompt + extra
+
+
+def build_discriminative_rescue_prompt(benchmark: Benchmark, build_results: Sequence[Dict[str, Any]]) -> str:
+    benchmark_json = json.dumps(benchmark.to_prompt_payload(), indent=2)
+    build_json = json.dumps(list(build_results), indent=2)
+    if benchmark.dimensions:
+        return (
+            "Return one JSON object only.\n"
+            "This is the final discriminative rescue pass for a changed candidate that already passed the gate.\n"
+            "An all-zero dimension result is invalid.\n"
+            "At least one dimension delta must be non-zero.\n"
+            "If the effect is weak, use tiny signed deltas such as +/-0.01.\n"
+            "A strong focused win may carry one dimension substantially even if other dimensions stay flat.\n"
+            "Reward holistic-improvement only for a coherent integrated improvement, not a bundle of disconnected tweaks.\n"
+            "If the effect is mostly noise or churn, use slight negative values instead of zero.\n\n"
+            "Frozen benchmark:\n"
+            f"{benchmark_json}\n\n"
+            "Build/test results:\n"
+            f"{build_json}\n"
+        )
+    return (
+        "Return one JSON object only.\n"
+        "This is the final discriminative rescue pass for a changed candidate that already passed the gate.\n"
+        "Returning a baseline copy is invalid.\n"
+        "At least one feature row must differ from the frozen baseline.\n"
+        "If the effect is weak, make a minimal real difference.\n"
+        "If the effect is mostly churn, reflect a slight regression rather than a baseline copy.\n\n"
+        "Frozen benchmark:\n"
+        f"{benchmark_json}\n\n"
+        "Build/test results:\n"
+        f"{build_json}\n"
+    )
+
+
+def build_json_repair_prompt(
+    benchmark: Benchmark,
+    build_results: Sequence[Dict[str, Any]],
+    *,
+    prior_error: str,
+    final_pass: bool = False,
+) -> str:
+    base_prompt = build_evaluator_prompt(benchmark, build_results)
+    error_text = collapse_whitespace(prior_error or "Previous evaluator output was not valid JSON.")
+    if final_pass:
+        return (
+            "Return exactly one JSON object and nothing else.\n"
+            "The previous evaluator output was invalid and could not be parsed.\n"
+            f"Failure reason: {error_text}\n"
+            "You must return either a valid resolved measurement JSON object or a valid unresolved JSON object.\n"
+            "No prose, no bullets, no markdown fences, no prefatory text.\n\n"
+            f"{base_prompt}"
+        )
+    return (
+        f"{base_prompt}\n\n"
+        "Additional instruction for this retry:\n"
+        f"- The previous evaluator output was invalid and could not be parsed. Failure reason: {error_text}\n"
+        "- Return exactly one JSON object and nothing else.\n"
+        "- Do not narrate your inspection.\n"
+        "- If you are unsure, return unresolved JSON instead of prose.\n"
     )
 
 
@@ -1938,6 +2101,87 @@ def measurement_has_all_zero_deltas(measurement: Dict[str, Any]) -> bool:
     if not rows:
         return False
     return all(abs(float(row.get("delta", 0.0))) <= EPSILON for row in rows)
+
+
+def measurement_copies_task_baseline(benchmark: Benchmark, measurement: Dict[str, Any]) -> bool:
+    rows = measurement.get("feature_rows") or []
+    if not benchmark.tasks or not rows:
+        return False
+    feature_lookup = {
+        (str(row.get("persona_id", "")), str(row.get("task_id", ""))): row.get("feature", {})
+        for row in rows
+        if isinstance(row, dict)
+    }
+    expected_keys = {(task.persona_id, task.task_id) for task in benchmark.tasks}
+    if set(feature_lookup) != expected_keys:
+        return False
+    for task in benchmark.tasks:
+        if feature_lookup[(task.persona_id, task.task_id)] != task.baseline.to_dict():
+            return False
+    return True
+
+
+def measurement_needs_discrimination(benchmark: Benchmark, measurement: Dict[str, Any], *, require_nonzero_delta: bool) -> bool:
+    if not require_nonzero_delta:
+        return False
+    if int(measurement.get("g", 0)) != 1:
+        return False
+    if benchmark.dimensions:
+        return measurement_has_all_zero_deltas(measurement)
+    return measurement_copies_task_baseline(benchmark, measurement)
+
+
+def apply_conservative_discriminative_fallback(
+    benchmark: Benchmark,
+    measurement: Dict[str, Any],
+    *,
+    reason: str,
+) -> Dict[str, Any]:
+    note = collapse_whitespace(reason) or "Evaluator failed to discriminate a changed passing candidate."
+    updated = dict(measurement)
+    updated["criteria"] = [
+        {
+            **row,
+            "reason": collapse_whitespace(
+                f"{str(row.get('reason', '')).strip()} {note}".strip()
+            ),
+        }
+        for row in measurement.get("criteria", [])
+    ]
+    if benchmark.dimensions:
+        updated["dimension_rows"] = [
+            {
+                **row,
+                "delta": -RESCUE_SIGNED_DELTA if abs(float(row.get("delta", 0.0))) <= EPSILON else float(row.get("delta", 0.0)),
+                "confidence": max(float(row.get("confidence", 0.0)), RESCUE_MIN_CONFIDENCE),
+                "observability": max(float(row.get("observability", 0.0)), RESCUE_MIN_OBSERVABILITY),
+                "reason": collapse_whitespace(
+                    f"{str(row.get('reason', '')).strip()} Conservative slight-negative fallback applied because the evaluator would not return a discriminative score for this changed passing candidate."
+                ),
+            }
+            for row in measurement.get("dimension_rows", [])
+        ]
+        return updated
+
+    nudged_rows: List[Dict[str, Any]] = []
+    nudged = False
+    for row in measurement.get("feature_rows", []):
+        new_row = {
+            "persona_id": str(row.get("persona_id", "")),
+            "task_id": str(row.get("task_id", "")),
+            "feature": dict(row.get("feature", {})),
+        }
+        if not nudged:
+            feature = dict(new_row["feature"])
+            if isinstance(feature.get("response_seconds_total"), (int, float)):
+                feature["response_seconds_total"] = float(feature["response_seconds_total"]) + 0.1
+            else:
+                feature["p"] = int(feature.get("p", 0)) + 1
+            new_row["feature"] = feature
+            nudged = True
+        nudged_rows.append(new_row)
+    updated["feature_rows"] = nudged_rows
+    return updated
 
 
 def combine_usage_blocks(*blocks: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2379,6 +2623,35 @@ def score_variables(
         return score_variables_python(variables), "python"
 
 
+def run_validated_evaluator_prompt(
+    prompt: str,
+    *,
+    benchmark: Benchmark,
+    cwd: Path,
+    output_path: Path,
+    model: Optional[str],
+    tool: str,
+    timeout_seconds: int,
+) -> tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[str]]:
+    raw_message, usage = run_agent_prompt(
+        prompt,
+        cwd=cwd,
+        output_path=output_path,
+        model=model,
+        tool=tool,
+        timeout_seconds=timeout_seconds,
+        available_tools=("rg", "view", "glob"),
+        silent=True,
+        stream_mode="off",
+        reasoning_effort="low",
+    )
+    try:
+        measurement = validate_measurement(extract_json_object(raw_message), benchmark)
+    except Exception as exc:
+        return None, usage, str(exc)
+    return measurement, usage, None
+
+
 def write_debug_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -2409,8 +2682,9 @@ def evaluate_worktree(
             deadline_monotonic=deadline_monotonic,
         )
         evaluator_prompt = build_evaluator_prompt(benchmark, build_results)
-        raw_message, copilot_usage = run_agent_prompt(
+        measurement, copilot_usage, measurement_error = run_validated_evaluator_prompt(
             evaluator_prompt,
+            benchmark=benchmark,
             cwd=snapshot_root,
             output_path=LAST_EVALUATOR_MESSAGE,
             model=model,
@@ -2420,25 +2694,60 @@ def evaluate_worktree(
                 deadline_monotonic=deadline_monotonic,
                 label="evaluator",
             ),
-            available_tools=("rg", "view", "glob"),
-            silent=True,
-            stream_mode="off",
-            reasoning_effort="low",
         )
-        try:
-            measurement = validate_measurement(extract_json_object(raw_message), benchmark)
-        except Exception as exc:
-            raise RuntimeError(f"Evaluator measurement failed: {exc}") from exc
-        if require_nonzero_delta and benchmark.dimensions and measurement["g"] == 1 and measurement_has_all_zero_deltas(measurement):
-            retry_prompt = (
-                evaluator_prompt
-                + "\nAdditional instruction for this retry:\n"
-                + "- The previous evaluator output returned all-zero deltas for a changed candidate snapshot that passed the gate.\n"
-                + "- Reassess the snapshot and use small signed deltas when there is any real improvement or regression.\n"
-                + "- Return all-zero deltas only if the patch is functionally a no-op across every frozen dimension.\n"
+        if measurement is None:
+            retry_measurement, retry_usage, retry_error = run_validated_evaluator_prompt(
+                build_json_repair_prompt(
+                    benchmark,
+                    build_results,
+                    prior_error=measurement_error or "Failed to parse evaluator output.",
+                ),
+                benchmark=benchmark,
+                cwd=snapshot_root,
+                output_path=LAST_EVALUATOR_MESSAGE,
+                model=model,
+                tool=tool,
+                timeout_seconds=bounded_timeout(
+                    ALL_ZERO_RETRY_TIMEOUT_SECONDS,
+                    deadline_monotonic=deadline_monotonic,
+                    label="evaluator JSON repair retry",
+                ),
             )
-            retry_raw_message, retry_usage = run_agent_prompt(
-                retry_prompt,
+            copilot_usage = combine_usage_blocks(copilot_usage, retry_usage)
+            if retry_measurement is not None:
+                measurement = retry_measurement
+            else:
+                rescue_measurement, rescue_usage, rescue_error = run_validated_evaluator_prompt(
+                    build_json_repair_prompt(
+                        benchmark,
+                        build_results,
+                        prior_error="; ".join(part for part in (measurement_error, retry_error) if part),
+                        final_pass=True,
+                    ),
+                    benchmark=benchmark,
+                    cwd=snapshot_root,
+                    output_path=LAST_EVALUATOR_MESSAGE,
+                    model=model,
+                    tool=tool,
+                    timeout_seconds=bounded_timeout(
+                        ALL_ZERO_RETRY_TIMEOUT_SECONDS,
+                        deadline_monotonic=deadline_monotonic,
+                        label="evaluator JSON repair rescue",
+                    ),
+                )
+                copilot_usage = combine_usage_blocks(copilot_usage, rescue_usage)
+                if rescue_measurement is not None:
+                    measurement = rescue_measurement
+                else:
+                    failure_reason = "; ".join(
+                        part for part in (measurement_error, retry_error, rescue_error) if part
+                    )
+                    raise RuntimeError(f"Evaluator measurement failed: {failure_reason}")
+
+        if measurement_needs_discrimination(benchmark, measurement, require_nonzero_delta=require_nonzero_delta):
+            retry_measurement, retry_usage, retry_error = run_validated_evaluator_prompt(
+                build_discriminative_retry_prompt(benchmark, build_results),
+                benchmark=benchmark,
                 cwd=snapshot_root,
                 output_path=LAST_EVALUATOR_MESSAGE,
                 model=model,
@@ -2448,21 +2757,50 @@ def evaluate_worktree(
                     deadline_monotonic=deadline_monotonic,
                     label="all-zero evaluator retry",
                 ),
-                available_tools=("rg", "view", "glob"),
-                silent=True,
-                stream_mode="off",
-                reasoning_effort="low",
             )
-            try:
-                retried_measurement = validate_measurement(extract_json_object(retry_raw_message), benchmark)
-            except Exception as exc:
-                raise RuntimeError(f"Evaluator retry failed after all-zero measurement: {exc}") from exc
             copilot_usage = combine_usage_blocks(copilot_usage, retry_usage)
-            measurement = retried_measurement
-            if measurement["g"] == 1 and measurement_has_all_zero_deltas(measurement):
-                raise RuntimeError(
-                    "Evaluator returned all-zero deltas for a changed passing candidate; measurement was not discriminating enough."
+            if retry_measurement is not None and not measurement_needs_discrimination(
+                benchmark,
+                retry_measurement,
+                require_nonzero_delta=require_nonzero_delta,
+            ):
+                measurement = retry_measurement
+            else:
+                rescue_measurement, rescue_usage, rescue_error = run_validated_evaluator_prompt(
+                    build_discriminative_rescue_prompt(benchmark, build_results),
+                    benchmark=benchmark,
+                    cwd=snapshot_root,
+                    output_path=LAST_EVALUATOR_MESSAGE,
+                    model=model,
+                    tool=tool,
+                    timeout_seconds=bounded_timeout(
+                        ALL_ZERO_RETRY_TIMEOUT_SECONDS,
+                        deadline_monotonic=deadline_monotonic,
+                        label="discriminative evaluator rescue",
+                    ),
                 )
+                copilot_usage = combine_usage_blocks(copilot_usage, rescue_usage)
+                if rescue_measurement is not None and not measurement_needs_discrimination(
+                    benchmark,
+                    rescue_measurement,
+                    require_nonzero_delta=require_nonzero_delta,
+                ):
+                    measurement = rescue_measurement
+                else:
+                    failure_reason = "; ".join(
+                        part
+                        for part in (
+                            retry_error,
+                            rescue_error,
+                            "Conservative discriminative fallback applied after nondiscriminative evaluator output.",
+                        )
+                        if part
+                    )
+                    measurement = apply_conservative_discriminative_fallback(
+                        benchmark,
+                        measurement,
+                        reason=failure_reason,
+                    )
     finally:
         shutil.rmtree(snapshot_root, ignore_errors=True)
 
